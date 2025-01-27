@@ -1,0 +1,9 @@
+[package]
+name = "hexit"
+version = "0.1.0"
+authors = ["Hengo <leitner.andi@googlemail.com>"]
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.95"
+crossterm = "0.28.1"

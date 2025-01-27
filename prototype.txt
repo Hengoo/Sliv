@@ -1,0 +1,27 @@
+The top will have some status messages or features like tabs?
+
+mockup for 32 bit
+
+
+terminal start:
+/ c0ffee=affe \ 1258=1257 |
+===============================================================================
+DEC |             790,526 |
+HEX |         xx xc 0f fe |
+BIN | xxxx xxxx xxxx 1100 |
+BIN | 0000 1111 1111 1110 |
+
+
+
+mockup for 64 bit
+terminal start:
+/ c0ffee=affe \ 1258=1257 |
+===============================================================================
+DEC   |                    790 526 |                     45 054 |
+SIGNED|                    790 526 |                    -20 482 |
+HEX   |    xx xx xx xx xx xc 0f fe |    xx xx xx xx xx xx af fe |
+BIN 00|        xxxx xxxx xxxx xxxx |        xxxx xxxx xxxx xxxx |
+BIN 16|        xxxx xxxx xxxx xxxx |        xxxx xxxx xxxx xxxx |
+BIN 32|        xxxx xxxx xxxx 1100 |        xxxx xxxx xxxx xxxx |
+BIN 48|        0000 1111 1111 1110 |        1010 1111 1111 1110 |
+

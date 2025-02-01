@@ -4,7 +4,6 @@ pub struct Config {
     pub show_binary: bool,
 
     pub bit_width: u32,
-    // TODO bit map for what type of numbers we want to render
 }
 
 impl Default for Config {

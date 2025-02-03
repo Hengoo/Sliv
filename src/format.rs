@@ -1,21 +1,25 @@
 use crate::{INumber, UNumber};
 use anyhow::{Context, Ok, Result};
+use core::str;
 use std::io::Write;
 
-// Computations and formating is done on the stack
-// all strings are u8 arrays of length NUMBER_STRING_WIDTH
-// formatter producer text with padding
-// also has utility to remove padding and parse user change
+// Computations and formating is done with [u8; NUMBER_STRING_WIDTH] on the stack
+// Assumptions used in this file that are not validated:
+//  - numbers only have leading spaces, but never trailing spaces
+//  - strings only use u8 character
 
 // We support 64 bit numbers formated as decimal or hex
 // Binary designed for 16 bits -> need to split into multiple rows.
+
 // technically we only need 26 but making it larger significantly simplifies suff
-const NUMBER_STRING_WIDTH: usize = 32;
+pub const NUMBER_STRING_WIDTH: usize = 32;
 
 const CHAR_SPACE: u8 = ' ' as u8;
 const CHAR_COMMA: u8 = ',' as u8;
 const CHAR_MINUS: u8 = '-' as u8;
 
+// Convert to negative interpretaton IF it aligns with one of
+// the common integer sizes (i8, i16. i32, i64, i128)
 fn handle_negative(number: UNumber) -> (bool, INumber) {
     if number == 0 {
         return (false, number as INumber);
@@ -32,22 +36,26 @@ fn handle_negative(number: UNumber) -> (bool, INumber) {
     }
 }
 
+// adds separation character in number
+// simplified example
+// add_separator("12345", '#', 2) = "1#23#45"
+// Actual usage would have to use u8 fixed size slice
+// correctly supports negative numbers (minus is ignored)
 fn add_separator(
     text: &mut [u8; NUMBER_STRING_WIDTH],
     separator: u8,
     char_between_separator: u32,
 ) -> Result<()> {
-    // copy is done in place
+    // everything is done in place
     let chars = char_between_separator as usize;
-    let len = text.len();
     let word_len = text.trim_ascii_start().len();
-    // copy a few leading spaces, does not matter because we have padding
+    // might copy some leading spaces, does not matter because we always have adequate padding
     let block_count = (word_len + chars - 1) / chars;
     let block_len = chars + 1;
-    let start_write = len
+    let start_write = NUMBER_STRING_WIDTH
         .checked_sub(block_count * block_len)
         .context("Number is too long to add separator. Make sure to split binary numbers up")?;
-    let start_read = len - block_count * chars;
+    let start_read = NUMBER_STRING_WIDTH - block_count * chars;
 
     if block_count <= 1 {
         return Ok(());
@@ -100,9 +108,137 @@ pub fn format_hexadecimal(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> 
     Ok(text)
 }
 
+fn remove_separator(
+    mut text: [u8; NUMBER_STRING_WIDTH],
+    separator: u8,
+) -> [u8; NUMBER_STRING_WIDTH] {
+    let word_len = text.len();
+    let mut leading_spaces = 0;
+    for i in 0..word_len {
+        if text[i].is_ascii_whitespace() {
+            leading_spaces = i;
+        } else {
+            break;
+        }
+    }
+
+    let mut offset = leading_spaces;
+
+    for i in leading_spaces..word_len {
+        if text[i] == separator {
+            text.copy_within(offset..i, offset + 1);
+            text[offset] = CHAR_SPACE;
+            offset += 1;
+        }
+    }
+    text
+}
+
+pub fn parse_decimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
+    text = remove_separator(text, CHAR_COMMA);
+    UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 10)
+        .context("parsing decimal number failed")
+}
+
+pub fn parse_signed_decimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<INumber> {
+    text = remove_separator(text, CHAR_COMMA);
+    INumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 10)
+        .context("parsing signed decimal number failed")
+}
+
+pub fn parse_hexadecimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
+    text = remove_separator(text, CHAR_SPACE);
+    UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 16)
+        .context("parsing nexadecimal number failed")
+}
+
+pub fn parse_binary(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
+    text = remove_separator(text, CHAR_SPACE);
+    UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 2)
+        .context("parsing binary number failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pad(text: &[u8]) -> [u8; NUMBER_STRING_WIDTH] {
+        let mut result = [CHAR_SPACE; NUMBER_STRING_WIDTH];
+        result
+            .split_at_mut(NUMBER_STRING_WIDTH - text.len())
+            .1
+            .copy_from_slice(text);
+        result
+    }
+
+    #[test]
+    fn test_remove_separator() {
+        assert_eq!(
+            remove_separator(pad(b"test r t p b"), CHAR_SPACE).trim_ascii_start(),
+            b"testrtpb"
+        );
+
+        assert_eq!(
+            remove_separator(pad(b"1,234,567,890"), CHAR_SPACE).trim_ascii_start(),
+            b"1,234,567,890"
+        );
+        assert_eq!(
+            remove_separator(pad(b"-1,234,567,890"), CHAR_COMMA).trim_ascii_start(),
+            b"-1234567890"
+        );
+        assert_eq!(
+            remove_separator(b",,jjjjjj,j,,,-1,234,567,, ,,890,".clone(), CHAR_COMMA)
+                .trim_ascii_start(),
+            b"jjjjjjj-1234567 890"
+        );
+    }
+
+    #[test]
+    fn test_parse() {
+        assert_eq!(parse_decimal(pad(b"123")).unwrap(), 123);
+        assert_eq!(parse_decimal(pad(b"1,2,3")).unwrap(), 123);
+        assert_eq!(parse_decimal(pad(b",,,123,,")).unwrap(), 123);
+        assert_eq!(parse_decimal(pad(b"1,234,567,890")).unwrap(), 1234567890);
+        assert_eq!(
+            parse_decimal(pad(b"16,469,343,685,676,293,330")).unwrap(),
+            16469343685676293330
+        );
+
+        assert_eq!(parse_signed_decimal(pad(b"123")).unwrap(), 123);
+        assert_eq!(parse_signed_decimal(pad(b"1,2,3")).unwrap(), 123);
+        assert_eq!(parse_signed_decimal(pad(b",,,123,,")).unwrap(), 123);
+        assert_eq!(
+            parse_signed_decimal(pad(b"1,234,567,890")).unwrap(),
+            1234567890
+        );
+        assert_eq!(parse_signed_decimal(pad(b"-123")).unwrap(), -123);
+        assert_eq!(parse_signed_decimal(pad(b"-1,2,3")).unwrap(), -123);
+        assert_eq!(parse_signed_decimal(pad(b",,,-123,,")).unwrap(), -123);
+        assert_eq!(
+            parse_signed_decimal(pad(b"-1,234,567,890")).unwrap(),
+            -1234567890
+        );
+        assert_eq!(
+            parse_signed_decimal(pad(b"-1,977,400,388,033,258,286")).unwrap(),
+            -1977400388033258286
+        );
+
+        assert_eq!(parse_hexadecimal(pad(b"2A")).unwrap(), 42);
+        assert_eq!(parse_hexadecimal(pad(b"7 5B CD 15")).unwrap(), 123456789);
+        assert_eq!(parse_hexadecimal(pad(b"49 96 02 D2")).unwrap(), 1234567890);
+        assert_eq!(
+            parse_hexadecimal(pad(b"E4 8E DC D2 E4 8E DC D2")).unwrap(),
+            16469343685676293330
+        );
+        assert_eq!(parse_hexadecimal(pad(b"AFFEEE")).unwrap(), 11534062);
+
+        assert_eq!(parse_binary(pad(b"1111")).unwrap(), 15);
+        assert_eq!(parse_binary(pad(b"11111111")).unwrap(), 255);
+        assert_eq!(parse_binary(pad(b"11  1 1  1 1 1 1")).unwrap(), 255);
+        assert_eq!(parse_binary(pad(b"10 1010")).unwrap(), 42);
+        assert_eq!(parse_binary(pad(b"1111 0010")).unwrap(), 242);
+        assert_eq!(parse_binary(pad(b"1 0101 1110 0011 0110")).unwrap(), 89654);
+    }
 
     fn prep(text: Result<[u8; NUMBER_STRING_WIDTH]>) -> String {
         let text = text.unwrap();
@@ -122,6 +258,7 @@ mod tests {
         assert_eq!(prep(format_signed_decimal(num)), "-14");
         assert_eq!(prep(format_hexadecimal(num)), "F2");
         let num = 123456789;
+        // this and below binary numbers do not fit in string
         // assert_eq!(
         //     prep(format_binary(num)),
         //     "111 0101 1011 1100 1101 0001 0101"

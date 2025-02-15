@@ -1,5 +1,5 @@
 use crate::{INumber, UNumber};
-use anyhow::{Context, Ok, Result};
+use anyhow::{anyhow, Context, Ok, Result};
 use core::str;
 use std::io::Write;
 
@@ -16,13 +16,35 @@ pub const NUMBER_STRING_WIDTH: usize = 32;
 
 const CHAR_SPACE: u8 = ' ' as u8;
 const CHAR_COMMA: u8 = ',' as u8;
-const CHAR_MINUS: u8 = '-' as u8;
+pub const CHAR_MINUS: u8 = '-' as u8;
+
+pub fn char_to_number(char: char) -> UNumber {
+    match char {
+        '0' => 0,
+        '1' => 1,
+        '2' => 2,
+        '3' => 3,
+        '4' => 4,
+        '5' => 5,
+        '6' => 6,
+        '7' => 7,
+        '8' => 8,
+        '9' => 9,
+        'a' | 'A' => 0xA,
+        'b' | 'B' => 0xB,
+        'c' | 'C' => 0xC,
+        'd' | 'D' => 0xD,
+        'e' | 'E' => 0xE,
+        'f' | 'F' => 0xF,
+        _ => 0,
+    }
+}
 
 // Convert to negative interpretaton IF it aligns with one of
 // the common integer sizes (i8, i16. i32, i64, i128)
-fn handle_negative(number: UNumber) -> (bool, INumber) {
+pub fn handle_negative(number: UNumber) -> INumber {
     if number == 0 {
-        return (false, number as INumber);
+        return number as INumber;
     }
 
     let base = number.ilog2();
@@ -30,9 +52,9 @@ fn handle_negative(number: UNumber) -> (bool, INumber) {
         let mut res = -1;
         res <<= base;
         res |= number as INumber;
-        (true, res)
+        res
     } else {
-        (false, number as INumber)
+        number as INumber
     }
 }
 
@@ -79,31 +101,51 @@ fn add_separator(
     Ok(())
 }
 
-pub fn format_binary(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
+// TODO i might not need the with_separator!! remove it if not needed
+
+pub fn format_binary(number: UNumber, with_separator: bool) -> Result<[u8; NUMBER_STRING_WIDTH]> {
     let mut text = [CHAR_SPACE; NUMBER_STRING_WIDTH];
     write!(text.as_mut_slice(), "{number:>0$b}", NUMBER_STRING_WIDTH)?;
+    if !with_separator {
+        return Ok(text);
+    }
     add_separator(&mut text, CHAR_SPACE, 4)?;
     Ok(text)
 }
 
-pub fn format_decimal(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
+pub fn format_decimal(number: UNumber, with_separator: bool) -> Result<[u8; NUMBER_STRING_WIDTH]> {
     let mut text = [CHAR_SPACE; NUMBER_STRING_WIDTH];
     write!(text.as_mut_slice(), "{number:>0$}", NUMBER_STRING_WIDTH)?;
+    if !with_separator {
+        return Ok(text);
+    }
     add_separator(&mut text, CHAR_COMMA, 3)?;
     Ok(text)
 }
 
-pub fn format_signed_decimal(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
-    let (_, number) = handle_negative(number);
+pub fn format_signed_decimal(
+    number: UNumber,
+    with_separator: bool,
+) -> Result<[u8; NUMBER_STRING_WIDTH]> {
+    let number = handle_negative(number);
     let mut text = [CHAR_SPACE; NUMBER_STRING_WIDTH];
     write!(text.as_mut_slice(), "{number:>0$}", NUMBER_STRING_WIDTH)?;
+    if !with_separator {
+        return Ok(text);
+    }
     add_separator(&mut text, CHAR_COMMA, 3)?;
     Ok(text)
 }
 
-pub fn format_hexadecimal(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
+pub fn format_hexadecimal(
+    number: UNumber,
+    with_separator: bool,
+) -> Result<[u8; NUMBER_STRING_WIDTH]> {
     let mut text = [CHAR_SPACE; NUMBER_STRING_WIDTH];
     write!(text.as_mut_slice(), "{number:>0$X}", NUMBER_STRING_WIDTH)?;
+    if !with_separator {
+        return Ok(text);
+    }
     add_separator(&mut text, CHAR_SPACE, 2)?;
     Ok(text)
 }
@@ -136,26 +178,58 @@ fn remove_separator(
 
 pub fn parse_decimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
     text = remove_separator(text, CHAR_COMMA);
-    UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 10)
-        .context("parsing decimal number failed")
+    let res = UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 10);
+    if res.is_ok() {
+        return Ok(res.unwrap());
+    }
+    let err = res.unwrap_err();
+    match err.kind() {
+        std::num::IntErrorKind::PosOverflow => Ok(UNumber::MAX),
+        std::num::IntErrorKind::NegOverflow => Ok(UNumber::MIN),
+        _ => Err(anyhow!(err).context("Parsing unsigned decimal number failed")),
+    }
 }
 
 pub fn parse_signed_decimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<INumber> {
     text = remove_separator(text, CHAR_COMMA);
-    INumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 10)
-        .context("parsing signed decimal number failed")
+    let res = INumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 10);
+    if res.is_ok() {
+        return Ok(res.unwrap());
+    }
+    let err = res.unwrap_err();
+    match err.kind() {
+        std::num::IntErrorKind::PosOverflow => Ok(INumber::MAX),
+        std::num::IntErrorKind::NegOverflow => Ok(INumber::MIN),
+        _ => Err(anyhow!(err).context("Parsing signed decimal number failed")),
+    }
 }
 
 pub fn parse_hexadecimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
     text = remove_separator(text, CHAR_SPACE);
-    UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 16)
-        .context("parsing nexadecimal number failed")
+    let res = UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 16);
+    if res.is_ok() {
+        return Ok(res.unwrap());
+    }
+    let err = res.unwrap_err();
+    match err.kind() {
+        std::num::IntErrorKind::PosOverflow => Ok(UNumber::MAX),
+        std::num::IntErrorKind::NegOverflow => Ok(UNumber::MIN),
+        _ => Err(anyhow!(err).context("Parsing nexadecimal number failed")),
+    }
 }
 
 pub fn parse_binary(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
     text = remove_separator(text, CHAR_SPACE);
-    UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 2)
-        .context("parsing binary number failed")
+    let res = UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 2);
+    if res.is_ok() {
+        return Ok(res.unwrap());
+    }
+    let err = res.unwrap_err();
+    match err.kind() {
+        std::num::IntErrorKind::PosOverflow => Ok(UNumber::MAX),
+        std::num::IntErrorKind::NegOverflow => Ok(UNumber::MIN),
+        _ => Err(anyhow!(err).context("Parsing binary number failed")),
+    }
 }
 
 #[cfg(test)]
@@ -197,7 +271,7 @@ mod tests {
     fn test_parse() {
         assert_eq!(parse_decimal(pad(b"123")).unwrap(), 123);
         assert_eq!(parse_decimal(pad(b"1,2,3")).unwrap(), 123);
-        assert_eq!(parse_decimal(pad(b",,,123,,")).unwrap(), 123);
+        assert_eq!(parse_decimal(pad(b"0000,,,123,,")).unwrap(), 123);
         assert_eq!(parse_decimal(pad(b"1,234,567,890")).unwrap(), 1234567890);
         assert_eq!(
             parse_decimal(pad(b"16,469,343,685,676,293,330")).unwrap(),
@@ -248,50 +322,56 @@ mod tests {
     #[test]
     fn test_format() {
         let num = 42;
-        assert_eq!(prep(format_binary(num)), "10 1010");
-        assert_eq!(prep(format_decimal(num)), "42");
-        assert_eq!(prep(format_signed_decimal(num)), "42");
-        assert_eq!(prep(format_hexadecimal(num)), "2A");
+        assert_eq!(prep(format_binary(num, true)), "10 1010");
+        assert_eq!(prep(format_decimal(num, true)), "42");
+        assert_eq!(prep(format_signed_decimal(num, true)), "42");
+        assert_eq!(prep(format_hexadecimal(num, true)), "2A");
         let num = 242;
-        assert_eq!(prep(format_binary(num)), "1111 0010");
-        assert_eq!(prep(format_decimal(num)), "242");
-        assert_eq!(prep(format_signed_decimal(num)), "-14");
-        assert_eq!(prep(format_hexadecimal(num)), "F2");
+        assert_eq!(prep(format_binary(num, true)), "1111 0010");
+        assert_eq!(prep(format_decimal(num, true)), "242");
+        assert_eq!(prep(format_signed_decimal(num, true)), "-14");
+        assert_eq!(prep(format_hexadecimal(num, true)), "F2");
         let num = 123456789;
         // this and below binary numbers do not fit in string
         // assert_eq!(
-        //     prep(format_binary(num)),
+        //     prep(format_binary(num, true)),
         //     "111 0101 1011 1100 1101 0001 0101"
         // );
-        assert_eq!(prep(format_decimal(num)), "123,456,789");
-        assert_eq!(prep(format_signed_decimal(num)), "123,456,789");
-        assert_eq!(prep(format_hexadecimal(num)), "7 5B CD 15");
+        assert_eq!(prep(format_decimal(num, true)), "123,456,789");
+        assert_eq!(prep(format_signed_decimal(num, true)), "123,456,789");
+        assert_eq!(prep(format_hexadecimal(num, true)), "7 5B CD 15");
         let num = 1234567890;
         // assert_eq!(
-        //     prep(format_binary(num)),
+        //     prep(format_binary(num, true)),
         //     "100 1001 1001 0110 0000 0010 1101 0010"
         // );
-        assert_eq!(prep(format_decimal(num)), "1,234,567,890");
-        assert_eq!(prep(format_signed_decimal(num)), "1,234,567,890");
-        assert_eq!(prep(format_hexadecimal(num)), "49 96 02 D2");
+        assert_eq!(prep(format_decimal(num, true)), "1,234,567,890");
+        assert_eq!(prep(format_signed_decimal(num, true)), "1,234,567,890");
+        assert_eq!(prep(format_hexadecimal(num, true)), "49 96 02 D2");
         let num = 3834567890;
         // assert_eq!(
-        //     prep(format_binary(num)),
+        //     prep(format_binary(num, true)),
         //     "1110 0100 1000 1110 1101 1100 1101 0010"
         // );
-        assert_eq!(prep(format_decimal(num)), "3,834,567,890");
-        assert_eq!(prep(format_signed_decimal(num)), "-460,399,406");
-        assert_eq!(prep(format_hexadecimal(num)), "E4 8E DC D2");
+        assert_eq!(prep(format_decimal(num, true)), "3,834,567,890");
+        assert_eq!(prep(format_signed_decimal(num, true)), "-460,399,406");
+        assert_eq!(prep(format_hexadecimal(num, true)), "E4 8E DC D2");
         let num = 16469343685676293330;
         // assert_eq!(
-        //     prep(format_binary(num)),
+        //     prep(format_binary(num, true)),
         //     "1110 0100 1000 1110 1101 1100 1101 0010 1110 0100 1000 1110 1101 1100 1101 0010"
         // );
-        assert_eq!(prep(format_decimal(num)), "16,469,343,685,676,293,330");
         assert_eq!(
-            prep(format_signed_decimal(num)),
+            prep(format_decimal(num, true)),
+            "16,469,343,685,676,293,330"
+        );
+        assert_eq!(
+            prep(format_signed_decimal(num, true)),
             "-1,977,400,388,033,258,286"
         );
-        assert_eq!(prep(format_hexadecimal(num)), "E4 8E DC D2 E4 8E DC D2");
+        assert_eq!(
+            prep(format_hexadecimal(num, true)),
+            "E4 8E DC D2 E4 8E DC D2"
+        );
     }
 }

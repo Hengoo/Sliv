@@ -1,26 +1,24 @@
 use core::str;
+use std::result::Result::Ok;
 use std::{
     io::Write,
     ops::{Neg, Shl, Shr},
 };
 
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use crossterm::{
     cursor,
     event::{
         read, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, MouseEvent, MouseEventKind,
+        Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind,
     },
     style::{self, Stylize},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand, QueueableCommand,
 };
 
-use column::{Column, Cursor};
-use format::{
-    char_to_number, format_binary, format_decimal, format_hexadecimal, format_signed_decimal,
-    parse_binary, parse_decimal, parse_hexadecimal, parse_signed_decimal, NUMBER_STRING_WIDTH,
-};
+use column::{combine_number_text, format_automatic, parse_automatic, Column, Cursor};
+use format::{char_to_number, hex_to_u8_char, NUMBER_STRING_WIDTH};
 
 mod column;
 mod format;
@@ -53,8 +51,7 @@ struct App {
     tabs: Vec<[Column; COLUMN_COUNT]>,
     tab_index: usize,
     cursor: Cursor,
-    width: u16,
-    height: u16,
+    insert: bool,
 }
 
 impl App {
@@ -64,7 +61,6 @@ impl App {
         w.execute(EnterAlternateScreen)?
             .execute(EnableBracketedPaste)?
             .execute(EnableMouseCapture)?;
-        let (width, height) = terminal::size()?;
 
         let left = Column::new(0);
         let right = Column::new(1);
@@ -74,8 +70,7 @@ impl App {
             tabs: vec![[left, right]],
             tab_index: 0,
             cursor: Cursor::default(),
-            width,
-            height,
+            insert: true,
         })
     }
 
@@ -96,7 +91,9 @@ impl App {
     }
 
     fn redraw(&mut self) -> Result<()> {
-        Self::redraw_background(&mut self.w)?;
+        self.w.queue(terminal::Clear(terminal::ClearType::All))?;
+        Self::draw_background(&mut self.w)?;
+        self.draw_tabs()?;
         for c in 0..COLUMN_COUNT {
             let (number, cursor) = self.tabs[self.tab_index][c].get();
             Self::draw_column(&mut self.w, number, cursor.col)?;
@@ -106,12 +103,14 @@ impl App {
 
     fn run(&mut self) -> Result<()> {
         self.redraw()?;
+
+        // book keebing of last frames state so we know when to redraw
         let mut last_tab_index = self.tab_index;
         let mut last_numbers = (
             self.tabs[self.tab_index][0].get().0,
             self.tabs[self.tab_index][1].get().0,
         );
-        'outer: loop {
+        'update_loop: loop {
             let current_numbers = (
                 self.tabs[self.tab_index][0].get().0,
                 self.tabs[self.tab_index][1].get().0,
@@ -130,14 +129,11 @@ impl App {
             match read()? {
                 Event::Key(event) => {
                     match event.code {
-                        KeyCode::Backspace => {
-                            let mut tmp = self.cursor;
-                            tmp.move_left();
-                            self.remove_character(tmp)?
-                        }
                         // eXecure character (same keybind as in VIM)
-                        KeyCode::Char('x') | KeyCode::Delete => {
-                            self.remove_character(self.cursor)?
+                        KeyCode::Backspace | KeyCode::Char('x') => self.remove_character()?,
+                        KeyCode::Delete => {
+                            self.remove_character()?;
+                            self.cursor.move_right();
                         }
                         KeyCode::Enter => {}
                         KeyCode::Left => self.cursor.move_left(),
@@ -146,16 +142,43 @@ impl App {
                         KeyCode::Down => self.cursor.move_down(),
                         KeyCode::Home => self.cursor.swap_column(),
                         KeyCode::End => self.cursor.swap_column(),
-                        KeyCode::Tab => {}
-                        KeyCode::BackTab => {}
+                        KeyCode::Tab => {
+                            self.cursor.swap_column();
+                        }
+                        KeyCode::BackTab => {
+                            self.cursor.swap_column();
+                        }
+                        // go tab to right
+                        // ctrl -> new tab
+                        // alt -> remove tab
+                        KeyCode::Char('t') => {
+                            if event.modifiers.intersects(KeyModifiers::CONTROL) {
+                                let left = Column::new(0);
+                                let right = Column::new(1);
+                                self.tabs.push([left, right]);
+                                self.tab_index = self.tabs.len() - 1;
+                            } else if event.modifiers.intersects(KeyModifiers::ALT) {
+                                self.tabs.remove(self.tab_index);
+                                if self.tabs.is_empty() {
+                                    let left = Column::new(0);
+                                    let right = Column::new(1);
+                                    self.tabs.push([left, right]);
+                                }
+                                self.tab_index = self.tab_index.min(self.tabs.len() - 1);
+                            } else {
+                                self.tab_index += 1;
+                                self.tab_index %= self.tabs.len();
+                            }
+                        }
+                        // go tab to left
+                        KeyCode::Char('T') => {
+                            self.tab_index = self.tab_index.wrapping_sub(1);
+                            self.tab_index = self.tab_index.min(self.tabs.len() - 1);
+                        }
+
                         KeyCode::Insert => {}
                         // quit
-                        KeyCode::Char('q') => break 'outer,
-                        // delete
-                        KeyCode::Char('d') => {
-                            // TODO d is illegal due to hex
-                            // self.tabs[self.tab_index][self.cursor.col as usize].set(0, self.cursor)
-                        }
+                        KeyCode::Char('q') => break 'update_loop,
                         // undo
                         KeyCode::Char('u') => {
                             self.tabs[self.tab_index][self.cursor.col as usize].undo();
@@ -166,16 +189,13 @@ impl App {
                             self.tabs[self.tab_index][self.cursor.col as usize].redo();
                             (_, self.cursor) = self.get_current_column();
                         }
-                        // swap column
-                        KeyCode::Char('s') => self.cursor.swap_column(),
                         // yank
                         KeyCode::Char('y') => {
                             // TODO copy to clipboard
                         }
-                        // paste TODO (temporary abuse for plus)
+                        // paste
                         KeyCode::Char('p') => {
-                            let (a, b) = self.get_current_column();
-                            self.tabs[self.tab_index][self.cursor.col as usize].set(a + 42, b);
+                            // TODO paste from clipboard
                         }
                         KeyCode::Char('<') | KeyCode::Char('l') => {
                             let (num, cur) = self.get_current_column();
@@ -199,11 +219,20 @@ impl App {
                             self.tabs[self.tab_index][self.cursor.col as usize]
                                 .set(num.rotate_right(1), cur);
                         }
-                        KeyCode::Char('m') => self.current_toggle_sign(),
-                        KeyCode::Char('-') => self.current_toggle_sign(),
-                        KeyCode::Char('+') => self.current_set_positive(),
-                        // KeyCode::Char(char) => self.handle_replace_character(char)?,
-                        KeyCode::Char(char) => self.handle_insert_character(char)?,
+                        KeyCode::Char('s') => self.toggle_sign(),
+                        KeyCode::Char('-') => self.set_negative(),
+                        KeyCode::Char('+') => self.set_positive(),
+                        // toggle between insert and replace mode
+                        KeyCode::Char('i') => {
+                            self.insert = !self.insert;
+                        }
+                        KeyCode::Char(char) => {
+                            if self.insert {
+                                self.insert_character(char)?
+                            } else {
+                                self.replace_character(char)?
+                            }
+                        }
                         KeyCode::Esc => {}
                         _ => {}
                     }
@@ -235,12 +264,17 @@ impl App {
                 }
 
                 Event::Paste(data) => {
-                    // TODO parsing. Should handle binary / hex prefix
-                    write!(self.w, "{:?}", data)?;
-                }
-                Event::Resize(width, height) => {
-                    self.width = width;
-                    self.height = height;
+                    // TODO should be helper funcition
+                    // should handle hex or bin prefix (overwrites cursor bosition)
+                    let trim = data.as_bytes().trim_ascii();
+                    let mut text = [format::CHAR_SPACE; NUMBER_STRING_WIDTH];
+                    text[NUMBER_STRING_WIDTH as usize - trim.len()..NUMBER_STRING_WIDTH as usize]
+                        .copy_from_slice(trim);
+                    eprintln!("{text:?}");
+                    if let Ok(number) = parse_automatic(text, self.cursor.row) {
+                        self.tabs[self.tab_index][self.cursor.col as usize]
+                            .set(number, self.cursor);
+                    }
                 }
                 _ => {}
             }
@@ -248,14 +282,14 @@ impl App {
         Ok(())
     }
 
-    fn current_toggle_sign(&mut self) {
+    fn toggle_sign(&mut self) {
         let (num, _) = self.get_current_column();
         let signed = format::handle_negative(num);
         self.tabs[self.tab_index][self.cursor.col as usize]
             .set(signed.neg() as UNumber, self.cursor);
     }
 
-    fn current_set_positive(&mut self) {
+    fn set_positive(&mut self) {
         let (num, _) = self.get_current_column();
         let signed = format::handle_negative(num);
         if signed.is_negative() {
@@ -264,70 +298,25 @@ impl App {
         }
     }
 
-    fn format_automatic(number: UNumber, row: u8) -> Result<[u8; NUMBER_STRING_WIDTH]> {
-        match row {
-            1 => format_decimal(number, true),
-            2 => format_signed_decimal(number, true),
-            3 => format_hexadecimal(number, true),
-            _ => {
-                todo!()
-            }
-        }
-
-        // // bin is split in 4 numbers to fit on screen
-        // let mask = u16::MAX as UNumber;
-        // let num_partial_row = 4 - (UNumber::BITS - number.leading_zeros()) as u8 / 16;
-        // for i in 0..4 {
-        //     if i >= num_partial_row {
-        //         w.queue(cursor::MoveTo(col as u16, (row + i) as u16))?
-        //             .queue(style::Print("       0000 0000 0000 0000"))?;
-        //     }
-        //     let num = (number >> ((3 - i) * 16)) & mask;
-        //     if num != 0 {
-        //         Self::write_trimmed(w, format_binary(num, true)?, col, row + i)?;
-        //     }
-        // }
-    }
-
-    fn parse_automatic(text: [u8; NUMBER_STRING_WIDTH], row: u8) -> Result<UNumber> {
-        match row {
-            1 => parse_decimal(text),
-            2 => parse_signed_decimal(text).map(|n| n as UNumber),
-            3 => parse_hexadecimal(text),
-            _ => {
-                todo!()
-            }
+    fn set_negative(&mut self) {
+        let (num, _) = self.get_current_column();
+        let signed = format::handle_negative(num);
+        if signed.is_positive() {
+            self.tabs[self.tab_index][self.cursor.col as usize]
+                .set(signed.neg() as UNumber, self.cursor);
         }
     }
 
-    fn combine_number_text(left: &mut [u8; NUMBER_STRING_WIDTH], right: [u8; NUMBER_STRING_WIDTH]) {
-        let mut is_neg = false;
-        for (l, r) in left.iter_mut().zip(right.iter()) {
-            if *r == format::CHAR_MINUS {
-                is_neg = true;
-            } else if !r.is_ascii_whitespace() {
-                *l = *r;
-            }
-        }
-        // moves minus to leftmost char to avoid the user writing numbers left of it
-        if is_neg {
-            left[0] = format::CHAR_MINUS;
-        }
-    }
-
-    fn handle_replace_character(&mut self, char: char) -> Result<()> {
+    fn replace_character(&mut self, char: char) -> Result<()> {
         let (num, _) = self.get_current_column();
 
         match self.cursor.row {
             1 | 2 => match char {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
                     let mut text = *b",000,000,000,000,000,000,000,000";
-                    Self::combine_number_text(
-                        &mut text,
-                        Self::format_automatic(num, self.cursor.row)?,
-                    );
+                    combine_number_text(&mut text, format_automatic(num, self.cursor.row)?);
                     text[self.cursor.text_pos as usize + 5] = char as u8;
-                    let new_number = Self::parse_automatic(text, self.cursor.row)?;
+                    let new_number = parse_automatic(text, self.cursor.row)?;
                     self.tabs[self.tab_index][self.cursor.col as usize]
                         .set(new_number, self.cursor);
                 }
@@ -366,22 +355,19 @@ impl App {
         Ok(())
     }
 
-    fn handle_insert_character(&mut self, char: char) -> Result<()> {
+    fn insert_character(&mut self, char: char) -> Result<()> {
         let (num, _) = self.get_current_column();
 
         match self.cursor.row {
             1 | 2 => match char {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
                     let mut text = *b",000,000,000,000,000,000,000,000";
-                    Self::combine_number_text(
-                        &mut text,
-                        Self::format_automatic(num, self.cursor.row)?,
-                    );
+                    combine_number_text(&mut text, format_automatic(num, self.cursor.row)?);
                     let pos = self.cursor.text_pos as usize + 5;
                     // preserve a potential '-' at pos 0
                     text.copy_within(2..pos + 1, 1);
                     text[pos] = char as u8;
-                    let new_number = Self::parse_automatic(text, self.cursor.row)?;
+                    let new_number = parse_automatic(text, self.cursor.row)?;
                     self.tabs[self.tab_index][self.cursor.col as usize]
                         .set(new_number, self.cursor);
                 }
@@ -433,34 +419,35 @@ impl App {
         Ok(())
     }
 
-    fn remove_character(&mut self, cursor: Cursor) -> Result<()> {
+    fn remove_character(&mut self) -> Result<()> {
         let (num, _) = self.get_current_column();
-        assert_eq!(cursor.col, self.cursor.col);
         match self.cursor.row {
             1 | 2 => {
                 let mut text = *b",000,000,000,000,000,000,000,000";
-                Self::combine_number_text(&mut text, Self::format_automatic(num, cursor.row)?);
-                let pos = cursor.text_pos as usize + 5;
+                combine_number_text(&mut text, format_automatic(num, self.cursor.row)?);
+                let pos = self.cursor.text_pos as usize + 5;
                 text.copy_within(1..pos, 2);
-                let new_number = Self::parse_automatic(text, self.cursor.row)?;
-                self.tabs[self.tab_index][cursor.col as usize].set(new_number, self.cursor);
+                let new_number = parse_automatic(text, self.cursor.row)?;
+                self.tabs[self.tab_index][self.cursor.col as usize].set(new_number, self.cursor);
             }
             3 => {
-                let bit_pos =
-                    column::LOOKUP_TABLE[cursor.row as usize][cursor.text_pos as usize] * 4;
+                let bit_pos = column::LOOKUP_TABLE[self.cursor.row as usize]
+                    [self.cursor.text_pos as usize]
+                    * 4;
                 let left_mask = UNumber::MAX << bit_pos + 4;
                 let right_mask = !(UNumber::MAX << bit_pos);
                 let mut new_number = (num & left_mask) >> 4;
                 new_number |= num & right_mask;
-                self.tabs[self.tab_index][cursor.col as usize].set(new_number, self.cursor);
+                self.tabs[self.tab_index][self.cursor.col as usize].set(new_number, self.cursor);
             }
             4 | 5 | 6 | 7 => {
-                let bit_pos = column::LOOKUP_TABLE[cursor.row as usize][cursor.text_pos as usize];
+                let bit_pos =
+                    column::LOOKUP_TABLE[self.cursor.row as usize][self.cursor.text_pos as usize];
                 let left_mask = UNumber::MAX << bit_pos + 1;
                 let right_mask = !(UNumber::MAX << bit_pos);
                 let mut new_number = (num & left_mask) >> 1;
                 new_number |= num & right_mask;
-                self.tabs[self.tab_index][cursor.col as usize].set(new_number, self.cursor);
+                self.tabs[self.tab_index][self.cursor.col as usize].set(new_number, self.cursor);
             }
             _ => {}
         }
@@ -487,36 +474,45 @@ impl App {
 
     fn draw_column(w: &mut Writer, number: UNumber, column_index: u8) -> Result<()> {
         let col = NUMBER_START_X + column_index * { NUMBER_DIGIT_WIDTH + 3 };
-        let mut row = NUMBER_START_Y;
-        // decimal
-        Self::write_trimmed(w, format_decimal(number, true)?, col, row)?;
-        row += 1;
-        // signes
-        Self::write_trimmed(w, format_signed_decimal(number, true)?, col, row)?;
-        row += 1;
-        // hex
-        Self::write_trimmed(w, format_hexadecimal(number, true)?, col, row)?;
-        row += 1;
 
-        // bin is split in 4 numbers to fit on screen
-        let mask = u16::MAX as UNumber;
-        let num_partial_row = 4 - (UNumber::BITS - number.leading_zeros()) as u8 / 16;
-        for i in 0..4 {
-            if i >= num_partial_row {
-                w.queue(cursor::MoveTo(col as u16, (row + i) as u16))?
-                    .queue(style::Print("       0000 0000 0000 0000"))?;
-            }
-            let num = (number >> ((3 - i) * 16)) & mask;
-            if num != 0 {
-                Self::write_trimmed(w, format_binary(num, true)?, col, row + i)?;
+        for row in 1..8 {
+            Self::write_trimmed(w, format_automatic(number, row)?, col, row + 1)?;
+        }
+        return Ok(());
+    }
+
+    fn draw_tabs(&mut self) -> Result<()> {
+        let w = &mut self.w;
+        w.queue(cursor::MoveTo(0, 0))?;
+        for t in 0..self.tabs.len() {
+            let mut text = *b"     |     ";
+            let [left, right] = &self.tabs[t];
+            let (n, _) = left.get();
+            text[1] = hex_to_u8_char(n, 12);
+            text[2] = hex_to_u8_char(n, 8);
+            text[3] = hex_to_u8_char(n, 4);
+            text[4] = hex_to_u8_char(n, 0);
+
+            let (n, _) = right.get();
+            text[6] = hex_to_u8_char(n, 12);
+            text[7] = hex_to_u8_char(n, 8);
+            text[8] = hex_to_u8_char(n, 4);
+            text[9] = hex_to_u8_char(n, 0);
+            if t == self.tab_index {
+                text[0] = '/' as u8;
+                text[10] = '\\' as u8;
+                w.queue(style::Print(str::from_utf8(&text)?))?;
+            } else {
+                w.queue(style::PrintStyledContent(
+                    str::from_utf8(&text)?.with(COLOR_UNUSED_DIGIT),
+                ))?;
             }
         }
 
         Ok(())
     }
 
-    fn redraw_background(w: &mut Writer) -> Result<()> {
-        w.queue(terminal::Clear(terminal::ClearType::All))?;
+    fn draw_background(w: &mut Writer) -> Result<()> {
         // fist row is reserved for tabs
         w.queue(cursor::MoveTo(0, NUMBER_START_Y as u16 - 1))?
             .queue(style::Print(

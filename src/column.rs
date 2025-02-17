@@ -1,10 +1,15 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossterm::{cursor, QueueableCommand};
 
 use crate::{UNumber, Writer};
 use std::time::Instant;
 
-// not using enums to keep the table readable
+use crate::format::{
+    format_binary, format_decimal, format_hexadecimal, format_signed_decimal, parse_binary,
+    parse_decimal, parse_hexadecimal, parse_signed_decimal, NUMBER_STRING_WIDTH,
+};
+
+// We are not using enums to keep the table somewhat readable
 
 // SeparatorCell in lookup table
 const SC: u8 = u8::MAX;
@@ -218,6 +223,66 @@ impl Column {
 
     pub fn redo(&mut self) {
         self.index = self.history.len().min(self.index + 2) - 1;
+    }
+}
+
+pub fn combine_number_text(left: &mut [u8; NUMBER_STRING_WIDTH], right: [u8; NUMBER_STRING_WIDTH]) {
+    let mut is_neg = false;
+    for (l, r) in left.iter_mut().zip(right.iter()) {
+        if *r == crate::format::CHAR_MINUS {
+            is_neg = true;
+        } else if !r.is_ascii_whitespace() {
+            *l = *r;
+        }
+    }
+    // moves minus to leftmost char to avoid the user writing numbers left of it
+    if is_neg {
+        left[0] = crate::format::CHAR_MINUS;
+    }
+}
+
+// Format depending on the row
+// 1 = decimal
+// 2 = signed
+// 3 = hex
+// 4, 5, 6, 7 = combined binary
+pub fn format_automatic(number: UNumber, row: u8) -> Result<[u8; NUMBER_STRING_WIDTH]> {
+    match row {
+        1 => format_decimal(number),
+        2 => format_signed_decimal(number),
+        3 => format_hexadecimal(number),
+        4 | 5 | 6 | 7 => {
+            // bin is split in 4 numbers to fit on screen
+            let mask = u16::MAX as UNumber;
+            let num_partial_row = 4 - (UNumber::BITS - number.leading_zeros()) as u8 / 16;
+            let i = row - 4;
+            let mut text = if i >= num_partial_row {
+                *b"             0000 0000 0000 0000"
+            } else {
+                *b"                                "
+            };
+            let num = (number >> ((3 - i) * 16)) & mask;
+            if num != 0 || row == 7 {
+                combine_number_text(&mut text, format_binary(num)?);
+            }
+            Ok(text)
+        }
+        _ => Err(anyhow!("Wrong row?")),
+    }
+}
+
+// Parse depending on the row
+// 1 = decimal
+// 2 = signed
+// 3 = hex
+// 4, 5, 6, 7 = combined binary
+pub fn parse_automatic(text: [u8; NUMBER_STRING_WIDTH], row: u8) -> Result<UNumber> {
+    match row {
+        1 => parse_decimal(text),
+        2 => parse_signed_decimal(text).map(|n| n as UNumber),
+        3 => parse_hexadecimal(text),
+        4 | 5 | 6 | 7 => parse_binary(text),
+        _ => Err(anyhow!("Wrong row?")),
     }
 }
 

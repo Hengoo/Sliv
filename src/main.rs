@@ -2,7 +2,7 @@ use core::str;
 use std::result::Result::Ok;
 use std::{
     io::Write,
-    ops::{Neg, Shl, Shr},
+    ops::{Shl, Shr},
 };
 
 use anyhow::Result;
@@ -17,8 +17,11 @@ use crossterm::{
     ExecutableCommand, QueueableCommand,
 };
 
-use column::{combine_number_text, format_automatic, parse_automatic, Column, Cursor};
-use format::{char_to_number, hex_to_u8_char, NUMBER_STRING_WIDTH};
+use column::{Column, Cursor, Row};
+use format::{
+    format_automatic, hex_to_u8_char, insert_characters_automatic, parse_automatic,
+    remove_character_automatic, replace_characters_automatic, NUMBER_STRING_WIDTH,
+};
 
 mod column;
 mod format;
@@ -90,6 +93,10 @@ impl App {
             .get()
     }
 
+    fn set_number(&mut self, number: UNumber) {
+        self.tabs[self.tab_index][self.cursor.col as usize].set(number, self.cursor);
+    }
+
     fn redraw(&mut self) -> Result<()> {
         self.w.queue(terminal::Clear(terminal::ClearType::All))?;
         Self::draw_background(&mut self.w)?;
@@ -130,9 +137,15 @@ impl App {
                 Event::Key(event) => {
                     match event.code {
                         // eXecure character (same keybind as in VIM)
-                        KeyCode::Backspace | KeyCode::Char('x') => self.remove_character()?,
+                        KeyCode::Backspace | KeyCode::Char('x') => {
+                            let (num, _) = self.get_current_column();
+                            let num = remove_character_automatic(num, self.cursor);
+                            self.set_number(num);
+                        }
                         KeyCode::Delete => {
-                            self.remove_character()?;
+                            let (num, _) = self.get_current_column();
+                            let num = remove_character_automatic(num, self.cursor);
+                            self.set_number(num);
                             self.cursor.move_right();
                         }
                         KeyCode::Enter => {}
@@ -181,8 +194,8 @@ impl App {
                         KeyCode::Char('q') => break 'update_loop,
                         // undo
                         KeyCode::Char('u') => {
-                            self.tabs[self.tab_index][self.cursor.col as usize].undo();
                             (_, self.cursor) = self.get_current_column();
+                            self.tabs[self.tab_index][usize::from(self.cursor.col)].undo();
                         }
                         // redo
                         KeyCode::Char('U') => {
@@ -197,27 +210,28 @@ impl App {
                         KeyCode::Char('p') => {
                             // TODO paste from clipboard
                         }
+                        // paste at position
+                        KeyCode::Char('P') => {
+                            // TODO paste from clipboard
+                            // paste the numbers at position (guess char by char. Make sure history is not polluted)
+                        }
                         KeyCode::Char('<') | KeyCode::Char('l') => {
-                            let (num, cur) = self.get_current_column();
-                            self.tabs[self.tab_index][self.cursor.col as usize]
-                                .set(num.shl(1), cur);
+                            let (num, _) = self.get_current_column();
+                            self.set_number(num.shl(1));
                         }
                         KeyCode::Char('>') | KeyCode::Char('r') => {
-                            let (num, cur) = self.get_current_column();
-                            self.tabs[self.tab_index][self.cursor.col as usize]
-                                .set(num.shr(1), cur);
+                            let (num, _) = self.get_current_column();
+                            self.set_number(num.shr(1));
                         }
                         // rotate left
                         KeyCode::Char('L') => {
-                            let (num, cur) = self.get_current_column();
-                            self.tabs[self.tab_index][self.cursor.col as usize]
-                                .set(num.rotate_left(1), cur);
+                            let (num, _) = self.get_current_column();
+                            self.set_number(num.rotate_left(1));
                         }
                         // rotate right
                         KeyCode::Char('R') => {
-                            let (num, cur) = self.get_current_column();
-                            self.tabs[self.tab_index][self.cursor.col as usize]
-                                .set(num.rotate_right(1), cur);
+                            let (num, _) = self.get_current_column();
+                            self.set_number(num.rotate_right(1));
                         }
                         KeyCode::Char('s') => self.toggle_sign(),
                         KeyCode::Char('-') => self.set_negative(),
@@ -226,12 +240,11 @@ impl App {
                         KeyCode::Char('i') => {
                             self.insert = !self.insert;
                         }
+                        KeyCode::Char(' ') => {
+                            self.handle_char_input('0');
+                        }
                         KeyCode::Char(char) => {
-                            if self.insert {
-                                self.insert_character(char)?
-                            } else {
-                                self.replace_character(char)?
-                            }
+                            self.handle_char_input(char);
                         }
                         KeyCode::Esc => {}
                         _ => {}
@@ -243,13 +256,15 @@ impl App {
                     row,
                     modifiers: _,
                 }) => {
-                    self.cursor.row = row.clamp(NUMBER_START_Y as u16, NUMBER_START_Y as u16 + 7)
-                        as u8
-                        - NUMBER_START_Y
-                        + 1;
+                    self.cursor.row = Row::try_from(
+                        row.clamp(NUMBER_START_Y.into(), u16::from(NUMBER_START_Y) + 7) as u8
+                            - NUMBER_START_Y
+                            + 1,
+                    )
+                    .unwrap();
                     let tmp = column.clamp(
-                        NUMBER_START_X as u16,
-                        NUMBER_START_X as u16 + NUMBER_DIGIT_WIDTH as u16 * 2 + 2,
+                        NUMBER_START_X.into(),
+                        u16::from(NUMBER_START_X) + u16::from(NUMBER_DIGIT_WIDTH) * 2 + 2,
                     ) as u8
                         - NUMBER_START_X
                         + 1;
@@ -265,16 +280,11 @@ impl App {
 
                 Event::Paste(data) => {
                     // TODO should be helper funcition
-                    // should handle hex or bin prefix (overwrites cursor bosition)
+                    // should handle hex or bin prefix (overwrites cursor position)
                     let trim = data.as_bytes().trim_ascii();
-                    let mut text = [format::CHAR_SPACE; NUMBER_STRING_WIDTH];
-                    text[NUMBER_STRING_WIDTH as usize - trim.len()..NUMBER_STRING_WIDTH as usize]
-                        .copy_from_slice(trim);
-                    eprintln!("{text:?}");
-                    if let Ok(number) = parse_automatic(text, self.cursor.row) {
-                        self.tabs[self.tab_index][self.cursor.col as usize]
-                            .set(number, self.cursor);
-                    }
+                    let (num, _) = self.get_current_column();
+                    let num = replace_characters_automatic(num, self.cursor, trim);
+                    self.set_number(num);
                 }
                 _ => {}
             }
@@ -282,19 +292,34 @@ impl App {
         Ok(())
     }
 
+    fn handle_char_input(&mut self, char: char) {
+        if self.insert {
+            let (num, _) = self.get_current_column();
+            let num = insert_characters_automatic(num, self.cursor, &[char as u8]);
+            self.set_number(num);
+        } else {
+            let (num, _) = self.get_current_column();
+            let num = replace_characters_automatic(num, self.cursor, &[char as u8]);
+            self.set_number(num);
+        }
+    }
+
     fn toggle_sign(&mut self) {
         let (num, _) = self.get_current_column();
         let signed = format::handle_negative(num);
-        self.tabs[self.tab_index][self.cursor.col as usize]
-            .set(signed.neg() as UNumber, self.cursor);
+        if let Some(neg) = signed.checked_neg() {
+            self.set_number(neg as UNumber);
+        } else {
+            // this can only happen if singed num was MIN
+            self.set_number((INumber::MAX) as UNumber + 1);
+        }
     }
 
     fn set_positive(&mut self) {
         let (num, _) = self.get_current_column();
         let signed = format::handle_negative(num);
         if signed.is_negative() {
-            self.tabs[self.tab_index][self.cursor.col as usize]
-                .set(signed.neg() as UNumber, self.cursor);
+            self.toggle_sign();
         }
     }
 
@@ -302,164 +327,15 @@ impl App {
         let (num, _) = self.get_current_column();
         let signed = format::handle_negative(num);
         if signed.is_positive() {
-            self.tabs[self.tab_index][self.cursor.col as usize]
-                .set(signed.neg() as UNumber, self.cursor);
+            self.toggle_sign();
         }
-    }
-
-    fn replace_character(&mut self, char: char) -> Result<()> {
-        let (num, _) = self.get_current_column();
-
-        match self.cursor.row {
-            1 | 2 => match char {
-                '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
-                    let mut text = *b",000,000,000,000,000,000,000,000";
-                    combine_number_text(&mut text, format_automatic(num, self.cursor.row)?);
-                    text[self.cursor.text_pos as usize + 5] = char as u8;
-                    let new_number = parse_automatic(text, self.cursor.row)?;
-                    self.tabs[self.tab_index][self.cursor.col as usize]
-                        .set(new_number, self.cursor);
-                }
-                _ => {}
-            },
-            3 => match char {
-                '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'A' | 'B' | 'C'
-                | 'D' | 'E' | 'F' | 'a' | 'b' | 'c' | 'd' | 'e' | 'f' => {
-                    let bit_pos = column::LOOKUP_TABLE[self.cursor.row as usize]
-                        [self.cursor.text_pos as usize]
-                        * 4;
-                    let mut new_number = num & !(0xF << bit_pos);
-                    new_number |= char_to_number(char) << bit_pos;
-                    self.tabs[self.tab_index][self.cursor.col as usize]
-                        .set(new_number, self.cursor);
-                }
-                _ => {}
-            },
-            4 | 5 | 6 | 7 => {
-                if char == '0' || char == '1' {
-                    let bit_pos = column::LOOKUP_TABLE[self.cursor.row as usize]
-                        [self.cursor.text_pos as usize];
-                    let mask = 1 << bit_pos;
-                    let new_number = match char {
-                        '1' => num | mask,
-                        '0' => num & !mask,
-                        _ => num,
-                    };
-                    self.tabs[self.tab_index][self.cursor.col as usize]
-                        .set(new_number, self.cursor);
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    fn insert_character(&mut self, char: char) -> Result<()> {
-        let (num, _) = self.get_current_column();
-
-        match self.cursor.row {
-            1 | 2 => match char {
-                '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
-                    let mut text = *b",000,000,000,000,000,000,000,000";
-                    combine_number_text(&mut text, format_automatic(num, self.cursor.row)?);
-                    let pos = self.cursor.text_pos as usize + 5;
-                    // preserve a potential '-' at pos 0
-                    text.copy_within(2..pos + 1, 1);
-                    text[pos] = char as u8;
-                    let new_number = parse_automatic(text, self.cursor.row)?;
-                    self.tabs[self.tab_index][self.cursor.col as usize]
-                        .set(new_number, self.cursor);
-                }
-                _ => {}
-            },
-            3 => match char {
-                '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'A' | 'B' | 'C'
-                | 'D' | 'E' | 'F' | 'a' | 'b' | 'c' | 'd' | 'e' | 'f' => {
-                    if num.leading_zeros() < 4 {
-                        self.tabs[self.tab_index][self.cursor.col as usize]
-                            .set(UNumber::MAX, self.cursor);
-                    } else {
-                        let bit_pos = column::LOOKUP_TABLE[self.cursor.row as usize]
-                            [self.cursor.text_pos as usize]
-                            * 4;
-                        let left_mask = UNumber::MAX << bit_pos;
-                        let mut new_number = (num & left_mask) << 4;
-                        new_number |= num & !left_mask;
-                        new_number |= char_to_number(char) << bit_pos;
-                        self.tabs[self.tab_index][self.cursor.col as usize]
-                            .set(new_number, self.cursor);
-                    }
-                }
-                _ => {}
-            },
-            4 | 5 | 6 | 7 => {
-                if char == '0' || char == '1' {
-                    if num.leading_zeros() == 0 {
-                        self.tabs[self.tab_index][self.cursor.col as usize]
-                            .set(UNumber::MAX, self.cursor);
-                    } else {
-                        let bit_pos = column::LOOKUP_TABLE[self.cursor.row as usize]
-                            [self.cursor.text_pos as usize];
-                        let left_mask = UNumber::MAX << bit_pos;
-                        let mut new_number = (num & left_mask) << 1;
-                        new_number |= num & !left_mask;
-                        new_number |= match char {
-                            '1' => 1 << bit_pos,
-                            _ => 0,
-                        };
-                        self.tabs[self.tab_index][self.cursor.col as usize]
-                            .set(new_number, self.cursor);
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    fn remove_character(&mut self) -> Result<()> {
-        let (num, _) = self.get_current_column();
-        match self.cursor.row {
-            1 | 2 => {
-                let mut text = *b",000,000,000,000,000,000,000,000";
-                combine_number_text(&mut text, format_automatic(num, self.cursor.row)?);
-                let pos = self.cursor.text_pos as usize + 5;
-                text.copy_within(1..pos, 2);
-                let new_number = parse_automatic(text, self.cursor.row)?;
-                self.tabs[self.tab_index][self.cursor.col as usize].set(new_number, self.cursor);
-            }
-            3 => {
-                let bit_pos = column::LOOKUP_TABLE[self.cursor.row as usize]
-                    [self.cursor.text_pos as usize]
-                    * 4;
-                let left_mask = UNumber::MAX << bit_pos + 4;
-                let right_mask = !(UNumber::MAX << bit_pos);
-                let mut new_number = (num & left_mask) >> 4;
-                new_number |= num & right_mask;
-                self.tabs[self.tab_index][self.cursor.col as usize].set(new_number, self.cursor);
-            }
-            4 | 5 | 6 | 7 => {
-                let bit_pos =
-                    column::LOOKUP_TABLE[self.cursor.row as usize][self.cursor.text_pos as usize];
-                let left_mask = UNumber::MAX << bit_pos + 1;
-                let right_mask = !(UNumber::MAX << bit_pos);
-                let mut new_number = (num & left_mask) >> 1;
-                new_number |= num & right_mask;
-                self.tabs[self.tab_index][self.cursor.col as usize].set(new_number, self.cursor);
-            }
-            _ => {}
-        }
-
-        Ok(())
     }
 
     fn write_trimmed(
         w: &mut Writer,
         text: [u8; NUMBER_STRING_WIDTH],
         col: u8,
-        row: u8,
+        row: Row,
     ) -> Result<()> {
         // avoid writing leading spaces so we can keep the background
         let trim = text.trim_ascii_start();
@@ -475,10 +351,18 @@ impl App {
     fn draw_column(w: &mut Writer, number: UNumber, column_index: u8) -> Result<()> {
         let col = NUMBER_START_X + column_index * { NUMBER_DIGIT_WIDTH + 3 };
 
-        for row in 1..8 {
-            Self::write_trimmed(w, format_automatic(number, row)?, col, row + 1)?;
+        for i in 1u8..8u8 {
+            let row = Row::try_from(i).unwrap();
+            let text = format_automatic(number, row);
+            // Signed is allowed to fail
+            if row == Row::Signed {
+                if let Ok(text) = text {
+                    Self::write_trimmed(w, text, col, row + 1)?;
+                }
+            }
+            Self::write_trimmed(w, text?, col, row + 1)?;
         }
-        return Ok(());
+        Ok(())
     }
 
     fn draw_tabs(&mut self) -> Result<()> {
@@ -499,8 +383,8 @@ impl App {
             text[8] = hex_to_u8_char(n, 4);
             text[9] = hex_to_u8_char(n, 0);
             if t == self.tab_index {
-                text[0] = '/' as u8;
-                text[10] = '\\' as u8;
+                text[0] = b'/';
+                text[10] = b'\\';
                 w.queue(style::Print(str::from_utf8(&text)?))?;
             } else {
                 w.queue(style::PrintStyledContent(

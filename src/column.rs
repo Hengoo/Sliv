@@ -1,13 +1,8 @@
-use anyhow::{anyhow, Result};
-use crossterm::{cursor, QueueableCommand};
+use anyhow::Result;
+use crossterm::{cursor, style, QueueableCommand};
 
 use crate::{UNumber, Writer};
-use std::time::Instant;
-
-use crate::format::{
-    format_binary, format_decimal, format_hexadecimal, format_signed_decimal, parse_binary,
-    parse_decimal, parse_hexadecimal, parse_signed_decimal, NUMBER_STRING_WIDTH,
-};
+use std::{ops, time::Instant};
 
 // We are not using enums to keep the table somewhat readable
 
@@ -26,6 +21,7 @@ const UP: u8 = u8::MAX - 5;
 // DownPadding
 const DP: u8 = u8::MAX - 6;
 // table has padding in all directions to simplify edge cases
+// TODO would be fancy to have custom accessor types? (using row enum, and maybe custom type for column????)
 pub const LOOKUP_TABLE: [[u8; 28]; 9] = [
     // upper padding
     [
@@ -75,9 +71,87 @@ pub const LOOKUP_TABLE: [[u8; 28]; 9] = [
 ];
 
 #[derive(Copy, Clone, PartialEq, Debug)]
+pub enum Row {
+    UpperPadding = 0,
+    Decimal,
+    Signed,
+    Hex,
+    Bin0,
+    Bin1,
+    Bin2,
+    Bin3,
+    LowerPadding,
+}
+
+const LAST_ROW: Row = Row::LowerPadding;
+
+impl TryFrom<u8> for Row {
+    type Error = ();
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        if v > LAST_ROW as u8 {
+            Err(())
+        } else {
+            unsafe { std::mem::transmute::<u8, std::result::Result<Row, ()>>(v) }
+        }
+    }
+}
+
+impl TryFrom<usize> for Row {
+    type Error = ();
+
+    fn try_from(v: usize) -> Result<Self, Self::Error> {
+        if v > LAST_ROW as usize {
+            Err(())
+        } else {
+            unsafe { std::mem::transmute::<u8, std::result::Result<Row, ()>>(v as u8) }
+        }
+    }
+}
+
+impl ops::Add<u8> for Row {
+    type Output = Self;
+
+    fn add(self, rhs: u8) -> Self::Output {
+        let num = (self as u8).saturating_add(rhs);
+        if let Ok(output) = Self::try_from(num) {
+            output
+        } else {
+            LAST_ROW
+        }
+    }
+}
+
+impl ops::AddAssign<u8> for Row {
+    fn add_assign(&mut self, rhs: u8) {
+        *self = *self + rhs;
+    }
+}
+
+impl ops::SubAssign<u8> for Row {
+    fn sub_assign(&mut self, rhs: u8) {
+        *self = *self - rhs;
+    }
+}
+
+impl ops::Sub<u8> for Row {
+    type Output = Self;
+
+    fn sub(self, rhs: u8) -> Self::Output {
+        let num = (self as u8).saturating_sub(rhs);
+        if let Ok(output) = Self::try_from(num) {
+            output
+        } else {
+            // Row does not have holes, so this should never happen, assuming the input enum was valid
+            unreachable!()
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Cursor {
     pub col: u8,
-    pub row: u8,
+    pub row: Row,
     // cursor position inside text row
     // This is the visual position, use the above table to derive the rest
     // 1 = leftmost, 26 = rightmost
@@ -157,6 +231,10 @@ impl Cursor {
     pub fn set_terminal_cursor(&self, w: &mut Writer) -> Result<()> {
         let y = self.row as u16 + 1;
         let x = 7 + self.col as u16 * 29 + self.text_pos as u16;
+        w.queue(cursor::MoveTo(x - 1, y))?;
+        // Experimenting with changing background color -> changes it for everything in the future
+        // w.queue(style::SetBackgroundColor(style::Color::Red))?;
+        w.queue(cursor::Show)?;
         w.queue(cursor::MoveTo(x, y))?;
         Ok(())
     }
@@ -169,7 +247,7 @@ impl Default for Cursor {
         // the above lookup datle goes to 27,27
         Cursor {
             col: 0,
-            row: 1,
+            row: Row::Decimal,
             text_pos: 26,
         }
     }
@@ -188,8 +266,10 @@ pub struct Column {
 
 impl Column {
     pub fn new(column_index: u8) -> Self {
-        let mut cursor = Cursor::default();
-        cursor.col = column_index;
+        let cursor = Cursor {
+            col: column_index,
+            ..Default::default()
+        };
         Self {
             history: vec![(0, cursor)],
             index: 0,
@@ -211,10 +291,10 @@ impl Column {
     }
 
     pub fn get(&self) -> (UNumber, Cursor) {
-        self.history
+        *self
+            .history
             .get(self.index)
             .expect("something went wrong with history index math")
-            .clone()
     }
 
     pub fn undo(&mut self) {
@@ -223,66 +303,6 @@ impl Column {
 
     pub fn redo(&mut self) {
         self.index = self.history.len().min(self.index + 2) - 1;
-    }
-}
-
-pub fn combine_number_text(left: &mut [u8; NUMBER_STRING_WIDTH], right: [u8; NUMBER_STRING_WIDTH]) {
-    let mut is_neg = false;
-    for (l, r) in left.iter_mut().zip(right.iter()) {
-        if *r == crate::format::CHAR_MINUS {
-            is_neg = true;
-        } else if !r.is_ascii_whitespace() {
-            *l = *r;
-        }
-    }
-    // moves minus to leftmost char to avoid the user writing numbers left of it
-    if is_neg {
-        left[0] = crate::format::CHAR_MINUS;
-    }
-}
-
-// Format depending on the row
-// 1 = decimal
-// 2 = signed
-// 3 = hex
-// 4, 5, 6, 7 = combined binary
-pub fn format_automatic(number: UNumber, row: u8) -> Result<[u8; NUMBER_STRING_WIDTH]> {
-    match row {
-        1 => format_decimal(number),
-        2 => format_signed_decimal(number),
-        3 => format_hexadecimal(number),
-        4 | 5 | 6 | 7 => {
-            // bin is split in 4 numbers to fit on screen
-            let mask = u16::MAX as UNumber;
-            let num_partial_row = 4 - (UNumber::BITS - number.leading_zeros()) as u8 / 16;
-            let i = row - 4;
-            let mut text = if i >= num_partial_row {
-                *b"             0000 0000 0000 0000"
-            } else {
-                *b"                                "
-            };
-            let num = (number >> ((3 - i) * 16)) & mask;
-            if num != 0 || row == 7 {
-                combine_number_text(&mut text, format_binary(num)?);
-            }
-            Ok(text)
-        }
-        _ => Err(anyhow!("Wrong row?")),
-    }
-}
-
-// Parse depending on the row
-// 1 = decimal
-// 2 = signed
-// 3 = hex
-// 4, 5, 6, 7 = combined binary
-pub fn parse_automatic(text: [u8; NUMBER_STRING_WIDTH], row: u8) -> Result<UNumber> {
-    match row {
-        1 => parse_decimal(text),
-        2 => parse_signed_decimal(text).map(|n| n as UNumber),
-        3 => parse_hexadecimal(text),
-        4 | 5 | 6 | 7 => parse_binary(text),
-        _ => Err(anyhow!("Wrong row?")),
     }
 }
 
@@ -299,7 +319,7 @@ mod tests {
             42,
             Cursor {
                 col: 3,
-                row: 0,
+                row: Row::UpperPadding,
                 text_pos: 7,
             },
         );
@@ -310,7 +330,7 @@ mod tests {
                 42,
                 Cursor {
                     col: 3,
-                    row: 0,
+                    row: Row::UpperPadding,
                     text_pos: 7,
                 }
             )
@@ -320,7 +340,7 @@ mod tests {
             77,
             Cursor {
                 col: 9,
-                row: 0,
+                row: Row::UpperPadding,
                 text_pos: 5,
             },
         );
@@ -330,7 +350,7 @@ mod tests {
                 77,
                 Cursor {
                     col: 9,
-                    row: 0,
+                    row: Row::UpperPadding,
                     text_pos: 5,
                 }
             )
@@ -344,7 +364,7 @@ mod tests {
                 42,
                 Cursor {
                     col: 3,
-                    row: 0,
+                    row: Row::UpperPadding,
                     text_pos: 7,
                 }
             )
@@ -365,7 +385,7 @@ mod tests {
                 42,
                 Cursor {
                     col: 3,
-                    row: 0,
+                    row: Row::UpperPadding,
                     text_pos: 7,
                 }
             )
@@ -379,7 +399,7 @@ mod tests {
                 77,
                 Cursor {
                     col: 9,
-                    row: 0,
+                    row: Row::UpperPadding,
                     text_pos: 5,
                 }
             )
@@ -392,7 +412,7 @@ mod tests {
                 77,
                 Cursor {
                     col: 9,
-                    row: 0,
+                    row: Row::UpperPadding,
                     text_pos: 5,
                 }
             )
@@ -405,7 +425,7 @@ mod tests {
             13,
             Cursor {
                 col: 2,
-                row: 0,
+                row: Row::UpperPadding,
                 text_pos: 1,
             },
         );
@@ -415,7 +435,7 @@ mod tests {
                 13,
                 Cursor {
                     col: 2,
-                    row: 0,
+                    row: Row::UpperPadding,
                     text_pos: 1,
                 }
             )
@@ -429,10 +449,10 @@ mod tests {
         // make sure it can recover from every field
         for r in 0..LOOKUP_TABLE.len() {
             for c in 0..LOOKUP_TABLE[0].len() {
-                cursor.row = r as u8;
+                cursor.row = Row::try_from(r).unwrap();
                 cursor.text_pos = c as u8;
                 cursor.fix_left();
-                cursor.row = r as u8;
+                cursor.row = Row::try_from(r).unwrap();
                 cursor.text_pos = c as u8;
                 cursor.fix_right();
             }
@@ -440,16 +460,16 @@ mod tests {
         // make sure there are no endless loops
         for r in 1..LOOKUP_TABLE.len() - 1 {
             for c in 1..LOOKUP_TABLE[0].len() - 1 {
-                cursor.row = r as u8;
+                cursor.row = Row::try_from(r).unwrap();
                 cursor.text_pos = c as u8;
                 cursor.move_left();
-                cursor.row = r as u8;
+                cursor.row = Row::try_from(r).unwrap();
                 cursor.text_pos = c as u8;
                 cursor.move_right();
-                cursor.row = r as u8;
+                cursor.row = Row::try_from(r).unwrap();
                 cursor.text_pos = c as u8;
                 cursor.move_up();
-                cursor.row = r as u8;
+                cursor.row = Row::try_from(r).unwrap();
                 cursor.text_pos = c as u8;
                 cursor.move_down();
             }
@@ -459,57 +479,57 @@ mod tests {
     fn test_cursor_movemint() {
         let mut cursor = Cursor::default();
         assert_eq!(cursor.col, 0);
-        assert_eq!(cursor.row, 1);
+        assert_eq!(cursor.row, Row::Decimal);
         assert_eq!(cursor.text_pos, 26);
 
         cursor.move_right();
-        assert_eq!(cursor.row, 1);
+        assert_eq!(cursor.row, Row::Decimal);
         assert_eq!(cursor.text_pos, 26);
 
         cursor.move_up();
-        assert_eq!(cursor.row, 1);
+        assert_eq!(cursor.row, Row::Decimal);
         assert_eq!(cursor.text_pos, 26);
 
         for i in 0..19 {
             cursor.move_left();
-            assert_eq!(cursor.row, 1);
+            assert_eq!(cursor.row, Row::Decimal);
             assert_eq!(cursor.text_pos, 25 - i - ((i + 1) / 3));
         }
 
         cursor.move_up();
-        assert_eq!(cursor.row, 1);
+        assert_eq!(cursor.row, Row::Decimal);
         assert_eq!(cursor.text_pos, 1);
         cursor.move_left();
-        assert_eq!(cursor.row, 1);
+        assert_eq!(cursor.row, Row::Decimal);
         assert_eq!(cursor.text_pos, 1);
 
         for i in 0..19 {
             cursor.move_right();
-            assert_eq!(cursor.row, 1);
+            assert_eq!(cursor.row, Row::Decimal);
             assert_eq!(cursor.text_pos, 2 + i + ((i + 2) / 3));
         }
 
-        assert_eq!(cursor.row, 1);
+        assert_eq!(cursor.row, Row::Decimal);
         assert_eq!(cursor.text_pos, 26);
         cursor.text_pos = 1;
         cursor.move_down();
-        assert_eq!(cursor.row, 2);
+        assert_eq!(cursor.row, Row::Signed);
         assert_eq!(cursor.text_pos, 1);
         cursor.move_down();
         // we are at hex
-        assert_eq!(cursor.row, 3);
+        assert_eq!(cursor.row, Row::Hex);
         assert_eq!(cursor.text_pos, 4);
         cursor.move_down();
         // we are at bin
-        assert_eq!(cursor.row, 4);
+        assert_eq!(cursor.row, Row::Bin0);
         assert_eq!(cursor.text_pos, 8);
         cursor.text_pos = 26;
         // test left / right jump down / up
         cursor.move_right();
-        assert_eq!(cursor.row, 5);
+        assert_eq!(cursor.row, Row::Bin1);
         assert_eq!(cursor.text_pos, 8);
         cursor.move_left();
-        assert_eq!(cursor.row, 4);
+        assert_eq!(cursor.row, Row::Bin0);
         assert_eq!(cursor.text_pos, 26);
 
         assert_eq!(cursor.col, 0);

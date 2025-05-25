@@ -27,36 +27,7 @@ BIN 48|        0000 1111 1111 1110 |        1010 1111 1111 1110 |
 
 
 
-
-
-keybinds:
-Normal mode
-movement: arrows + frst(colemark). If available i would also add hjkly
-c = jump between columns? 
-TODO keybind for changing tab?
-< and > to shift left / right (insert zero or remove lowest character)
-y = yank
-p = paste (in our case always replace)
-d = delete (reset column to zero)
-q = quit
-u = undo
-something to clear current block?
-
-
-MAYBE toggle with M between replace mode and insert mode
-
-Replace mode: replace the character the cursor is on and move cursor to right
-? = replace mode (r clashes with colemark arrows)
-esc = return to normal mode
-
-Insertion mode: insert characters (move existing ones to the left)
-i = enter insert mode left of cursor
-a = enter insert mode right of cursor
-esc = return to normal mode
-
-
-during insert / replace mode normal keybinds still work
-when editing hex ABCDEF is obviously taking writing priority
+ideas:
 
 TODO
 button to delete everything on the left of the cursor (maybe backspace combined with control)
@@ -64,3 +35,11 @@ button to right align the cursor (shift right x times until cursor is on the rig
 button to get the "smallest" signed representation of a number
 maybe M and m for minus(= smallest minus) and Minus(= 64bit minus)
 TODO delete must move to right when no character below cursor. (use format for decimal, and number rep for other)
+
+TODO if negative number is positive, make the number gray or don't show anything?
+
+
+Maybe rename to Sliv Small (simple?) leightweight integer visualisation
+
+
+TODO cursor copy paste. From cursor position to other position by chaning cursor.rigth or left...

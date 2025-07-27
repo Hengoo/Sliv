@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::{cursor, style, QueueableCommand};
+use crossterm::{cursor, QueueableCommand};
 
 use crate::{UNumber, Writer};
 use std::{ops, time::Instant};
@@ -30,18 +30,18 @@ pub const LOOKUP_TABLE: [[u8; 28]; 9] = [
     ],
     // decimal
     [
-        EL, 19, 18, SC, 17, 16, 15, SC, 14, 13, 12, SC, 11, 10, 09, SC, 08, 07, 06, SC, 05, 04, 03,
-        SC, 02, 01, 00, ER,
+        EL, 19, 18, SC, 17, 16, 15, SC, 14, 13, 12, SC, 11, 10, 9, SC, 8, 7, 6, SC, 5, 4, 3, SC, 2,
+        1, 0, ER,
     ],
     // signed
     [
-        EL, 19, 18, SC, 17, 16, 15, SC, 14, 13, 12, SC, 11, 10, 09, SC, 08, 07, 06, SC, 05, 04, 03,
-        SC, 02, 01, 00, ER,
+        EL, 19, 18, SC, 17, 16, 15, SC, 14, 13, 12, SC, 11, 10, 9, SC, 8, 7, 6, SC, 5, 4, 3, SC, 2,
+        1, 00, ER,
     ],
     // hex
     [
-        EL, EL, EL, EL, 15, 14, SC, 13, 12, SC, 11, 10, SC, 09, 08, SC, 07, 06, SC, 05, 04, SC, 03,
-        02, SC, 01, 00, ER,
+        EL, EL, EL, EL, 15, 14, SC, 13, 12, SC, 11, 10, SC, 9, 8, SC, 7, 6, SC, 5, 4, SC, 3, 2, SC,
+        1, 0, ER,
     ],
     // bin
     [
@@ -60,8 +60,8 @@ pub const LOOKUP_TABLE: [[u8; 28]; 9] = [
     ],
     // bin
     [
-        UJ, UJ, UJ, UJ, UJ, UJ, UJ, UJ, 15, 14, 13, 12, SC, 11, 10, 09, 08, SC, 07, 06, 05, 04, SC,
-        03, 02, 01, 00, ER,
+        UJ, UJ, UJ, UJ, UJ, UJ, UJ, UJ, 15, 14, 13, 12, SC, 11, 10, 9, 8, SC, 7, 6, 5, 4, SC, 3, 2,
+        1, 0, ER,
     ],
     // lower padding
     [
@@ -70,6 +70,8 @@ pub const LOOKUP_TABLE: [[u8; 28]; 9] = [
     ],
 ];
 
+// Allow dead code because we construct the enum via ways the static code analysis does not know of
+#[allow(dead_code)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum Row {
     UpperPadding = 0,

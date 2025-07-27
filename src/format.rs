@@ -156,135 +156,34 @@ fn add_separator(
     Ok(())
 }
 
+// writes a section (1/4) of the binary number
 pub fn format_binary(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
     let mut text = [b' '; NUMBER_STRING_WIDTH];
-    write!(text.as_mut_slice(), "{number:>0$b}", NUMBER_STRING_WIDTH)?;
+    write!(text.as_mut_slice(), "{number:>NUMBER_STRING_WIDTH$b}")?;
     add_separator(&mut text, b' ', 4)?;
     Ok(text)
 }
 
 pub fn format_decimal(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
     let mut text = [b' '; NUMBER_STRING_WIDTH];
-    write!(text.as_mut_slice(), "{number:>0$}", NUMBER_STRING_WIDTH)?;
+    write!(text.as_mut_slice(), "{number:>NUMBER_STRING_WIDTH$}")?;
     add_separator(&mut text, b',', 3)?;
     Ok(text)
 }
 
 pub fn format_signed_decimal(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
     let number = handle_negative(number);
-    if number.is_positive() {
-        // TODO change format to return result Opion
-        // return None
-    }
     let mut text = [b' '; NUMBER_STRING_WIDTH];
-    write!(text.as_mut_slice(), "{number:>0$}", NUMBER_STRING_WIDTH)?;
+    write!(text.as_mut_slice(), "{number:>NUMBER_STRING_WIDTH$}")?;
     add_separator(&mut text, b',', 3)?;
     Ok(text)
 }
 
 pub fn format_hexadecimal(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
     let mut text = [b' '; NUMBER_STRING_WIDTH];
-    write!(text.as_mut_slice(), "{number:>0$X}", NUMBER_STRING_WIDTH)?;
+    write!(text.as_mut_slice(), "{number:>NUMBER_STRING_WIDTH$X}")?;
     add_separator(&mut text, b' ', 2)?;
     Ok(text)
-}
-
-fn remove_separator(
-    mut text: [u8; NUMBER_STRING_WIDTH],
-    separator: u8,
-) -> [u8; NUMBER_STRING_WIDTH] {
-    let word_len = text.len();
-    let mut leading_spaces = 0;
-
-    for (i, char) in text.iter().enumerate() {
-        if char.is_ascii_whitespace() {
-            leading_spaces = i
-        } else {
-            break;
-        }
-    }
-
-    let mut offset = leading_spaces;
-
-    for i in leading_spaces..word_len {
-        if text[i] == separator {
-            text.copy_within(offset..i, offset + 1);
-            text[offset] = b' ';
-            offset += 1;
-        }
-    }
-    text
-}
-
-pub fn parse_decimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
-    text = remove_separator(text, b',');
-    let res = UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 10);
-    if let Ok(res) = res {
-        return Ok(res);
-    }
-    let err = res.unwrap_err();
-    match err.kind() {
-        std::num::IntErrorKind::PosOverflow => Ok(UNumber::MAX),
-        std::num::IntErrorKind::NegOverflow => Ok(UNumber::MIN),
-        _ => Err(anyhow!(err).context("Parsing unsigned decimal number failed")),
-    }
-}
-
-pub fn parse_signed_decimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<INumber> {
-    text = remove_separator(text, b',');
-    let res = INumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 10);
-    if let Ok(res) = res {
-        return Ok(res);
-    }
-    let err = res.unwrap_err();
-    match err.kind() {
-        std::num::IntErrorKind::PosOverflow => Ok(INumber::MAX),
-        std::num::IntErrorKind::NegOverflow => Ok(INumber::MIN),
-        _ => Err(anyhow!(err).context("Parsing signed decimal number failed")),
-    }
-}
-
-pub fn parse_hexadecimal(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
-    text = remove_separator(text, b' ');
-    let res = UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 16);
-    if let Ok(res) = res {
-        return Ok(res);
-    }
-    let err = res.unwrap_err();
-    match err.kind() {
-        std::num::IntErrorKind::PosOverflow => Ok(UNumber::MAX),
-        std::num::IntErrorKind::NegOverflow => Ok(UNumber::MIN),
-        _ => Err(anyhow!(err).context("Parsing nexadecimal number failed")),
-    }
-}
-
-pub fn parse_binary(mut text: [u8; NUMBER_STRING_WIDTH]) -> Result<UNumber> {
-    text = remove_separator(text, b' ');
-    let res = UNumber::from_str_radix(str::from_utf8(text.trim_ascii_start())?, 2);
-    if let Ok(res) = res {
-        return Ok(res);
-    }
-    let err = res.unwrap_err();
-    match err.kind() {
-        std::num::IntErrorKind::PosOverflow => Ok(UNumber::MAX),
-        std::num::IntErrorKind::NegOverflow => Ok(UNumber::MIN),
-        _ => Err(anyhow!(err).context("Parsing binary number failed")),
-    }
-}
-
-pub fn combine_number_text(left: &mut [u8; NUMBER_STRING_WIDTH], right: [u8; NUMBER_STRING_WIDTH]) {
-    let mut is_neg = false;
-    for (l, r) in left.iter_mut().zip(right.iter()) {
-        if *r == b'-' {
-            is_neg = true;
-        } else if !r.is_ascii_whitespace() {
-            *l = *r;
-        }
-    }
-    // moves minus to leftmost char to avoid the user writing numbers left of it
-    if is_neg {
-        left[0] = b'-';
-    }
 }
 
 pub fn format_automatic(number: UNumber, row: Row) -> Result<[u8; NUMBER_STRING_WIDTH]> {
@@ -304,7 +203,12 @@ pub fn format_automatic(number: UNumber, row: Row) -> Result<[u8; NUMBER_STRING_
             };
             let num = (number >> ((3 - i) * 16)) & mask;
             if num != 0 || row == Row::Bin3 {
-                combine_number_text(&mut text, format_binary(num)?);
+                let temp = format_binary(num)?;
+                for (l, r) in text.iter_mut().zip(temp.iter()) {
+                    if !r.is_ascii_whitespace() {
+                        *l = *r;
+                    }
+                }
             }
             Ok(text)
         }
@@ -312,14 +216,68 @@ pub fn format_automatic(number: UNumber, row: Row) -> Result<[u8; NUMBER_STRING_
     }
 }
 
-pub fn parse_automatic(text: [u8; NUMBER_STRING_WIDTH], row: Row) -> Result<UNumber> {
-    match row {
-        Row::Decimal => parse_decimal(text),
-        Row::Signed => parse_signed_decimal(text).map(|n| n as UNumber),
-        Row::Hex => parse_hexadecimal(text),
-        Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => parse_binary(text),
-        _ => Err(anyhow!("Wrong row?")),
+fn parse_decimal(mut input: String) -> Option<UNumber> {
+    input = input.trim().into();
+    if input.starts_with("0x")
+        || input.starts_with("0b")
+        || input.starts_with("0o")
+        || input.starts_with("-")
+    {
+        return None;
     }
+    input.retain(|c| c.is_ascii_digit());
+    UNumber::from_str_radix(&input, 10).ok()
+}
+
+fn parse_signed(mut input: String) -> Option<UNumber> {
+    if input.starts_with("0x") || input.starts_with("0b") || input.starts_with("0o") {
+        return None;
+    }
+    input.retain(|c| c.is_ascii_digit() || c == '-');
+    let signed = INumber::from_str_radix(&input, 10).ok();
+    signed.map(|num| num as UNumber)
+}
+
+fn parse_hex(mut input: String) -> Option<UNumber> {
+    if input.starts_with("0b") || input.starts_with("0o") || input.starts_with("-") {
+        return None;
+    }
+    input.retain(|c| c.is_ascii_hexdigit());
+    UNumber::from_str_radix(&input, 16).ok()
+}
+
+fn parse_bin(mut input: String) -> Option<UNumber> {
+    if input.starts_with("0x") || input.starts_with("0o") || input.starts_with("-") {
+        return None;
+    }
+    input.retain(|c| c.is_digit(2));
+    UNumber::from_str_radix(&input, 2).ok()
+}
+
+fn parse_oct(mut input: String) -> Option<UNumber> {
+    if input.starts_with("0b") || input.starts_with("0x") || input.starts_with("-") {
+        return None;
+    }
+    input.retain(|c| c.is_digit(8));
+    UNumber::from_str_radix(&input, 8).ok()
+}
+
+pub fn parse_user_input(input: &str, row: Row) -> Option<UNumber> {
+    let input = input.trim();
+    // first try parsing by type of cursor position
+    let result = match row {
+        Row::Decimal => parse_decimal(input.into()),
+        Row::Signed => parse_signed(input.into()),
+        Row::Hex => parse_hex(input.into()),
+        Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => parse_bin(input.into()),
+        _ => None,
+    };
+    result
+        .or(parse_decimal(input.into()))
+        .or(parse_signed(input.into()))
+        .or(parse_hex(input.into()))
+        .or(parse_bin(input.into()))
+        .or(parse_oct(input.into()))
 }
 
 pub fn replace_characters_automatic(number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
@@ -528,13 +486,21 @@ pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) ->
     }
 }
 
+// valid characters that are actualy "numbers" (excluding '-')
+pub fn is_valid_character_automatic(char: u8, row: Row) -> bool {
+    match row {
+        Row::Decimal | Row::Signed => char.is_ascii_digit(),
+        Row::Hex => char.is_ascii_hexdigit(),
+        Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => char == b'0' || char == b'1',
+        _ => false,
+    }
+}
+
+// assumes that only valid characters are passed.
+// Leading zero are also inserted
 pub fn insert_characters_automatic(mut number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
     // combination of shift + replace
-    if chars.len() > 1 {
-        // need to compute actual length beforehand
-        todo!()
-    }
-    number = shift_characters_automatic(number, cursor, 1);
+    number = shift_characters_automatic(number, cursor, chars.len().try_into().unwrap());
     match cursor.row {
         Row::Signed => {
             if number == INumber::MIN as UNumber {
@@ -566,83 +532,55 @@ pub fn remove_character_automatic(number: UNumber, cursor: Cursor) -> UNumber {
 mod tests {
     use super::*;
 
-    fn pad(text: &[u8]) -> [u8; NUMBER_STRING_WIDTH] {
-        let mut result = [b' '; NUMBER_STRING_WIDTH];
-        result
-            .split_at_mut(NUMBER_STRING_WIDTH - text.len())
-            .1
-            .copy_from_slice(text);
-        result
-    }
-
-    #[test]
-    fn test_remove_separator() {
-        std::env::set_var("RUST_BACKTRACE", "1");
-        assert_eq!(
-            remove_separator(pad(b"test r t p b"), b' ').trim_ascii_start(),
-            b"testrtpb"
-        );
-
-        assert_eq!(
-            remove_separator(pad(b"1,234,567,890"), b' ').trim_ascii_start(),
-            b"1,234,567,890"
-        );
-        assert_eq!(
-            remove_separator(pad(b"-1,234,567,890"), b',').trim_ascii_start(),
-            b"-1234567890"
-        );
-        assert_eq!(
-            remove_separator(*b",,jjjjjj,j,,,-1,234,567,, ,,890,", b',').trim_ascii_start(),
-            b"jjjjjjj-1234567 890"
-        );
-    }
-
     #[test]
     fn test_parse() {
         std::env::set_var("RUST_BACKTRACE", "1");
-        assert_eq!(parse_decimal(pad(b"123")).unwrap(), 123);
-        assert_eq!(parse_decimal(pad(b"1,2,3")).unwrap(), 123);
-        assert_eq!(parse_decimal(pad(b"0000,,,123,,")).unwrap(), 123);
-        assert_eq!(parse_decimal(pad(b"1,234,567,890")).unwrap(), 1234567890);
+        assert_eq!(parse_decimal("123".into()).unwrap(), 123);
+        assert_eq!(parse_decimal("1,2,3".into()).unwrap(), 123);
+        assert_eq!(parse_decimal("0000,,,123,,".into()).unwrap(), 123);
+        assert_eq!(parse_decimal("1,234,567,890".into()).unwrap(), 1234567890);
         assert_eq!(
-            parse_decimal(pad(b"16,469,343,685,676,293,330")).unwrap(),
+            parse_decimal("16,469,343,685,676,293,330".into()).unwrap(),
             16469343685676293330
         );
 
-        assert_eq!(parse_signed_decimal(pad(b"123")).unwrap(), 123);
-        assert_eq!(parse_signed_decimal(pad(b"1,2,3")).unwrap(), 123);
-        assert_eq!(parse_signed_decimal(pad(b",,,123,,")).unwrap(), 123);
+        assert_eq!(parse_signed("123".into()).unwrap(), 123);
+        assert_eq!(parse_signed("1,2,3".into()).unwrap(), 123);
+        assert_eq!(parse_signed(",,,123,,".into()).unwrap(), 123);
+        assert_eq!(parse_signed("1,234,567,890".into()).unwrap(), 1234567890);
+        assert_eq!(handle_negative(parse_signed("-123".into()).unwrap()), -123);
         assert_eq!(
-            parse_signed_decimal(pad(b"1,234,567,890")).unwrap(),
-            1234567890
+            handle_negative(parse_signed("-1,2,3".into()).unwrap()),
+            -123
         );
-        assert_eq!(parse_signed_decimal(pad(b"-123")).unwrap(), -123);
-        assert_eq!(parse_signed_decimal(pad(b"-1,2,3")).unwrap(), -123);
-        assert_eq!(parse_signed_decimal(pad(b",,,-123,,")).unwrap(), -123);
         assert_eq!(
-            parse_signed_decimal(pad(b"-1,234,567,890")).unwrap(),
+            handle_negative(parse_signed(",,,-123,,".into()).unwrap()),
+            -123
+        );
+        assert_eq!(
+            handle_negative(parse_signed("-1,234,567,890".into()).unwrap()),
             -1234567890
         );
         assert_eq!(
-            parse_signed_decimal(pad(b"-1,977,400,388,033,258,286")).unwrap(),
+            handle_negative(parse_signed("-1,977,400,388,033,258,286".into()).unwrap()),
             -1977400388033258286
         );
 
-        assert_eq!(parse_hexadecimal(pad(b"2A")).unwrap(), 42);
-        assert_eq!(parse_hexadecimal(pad(b"7 5B CD 15")).unwrap(), 123456789);
-        assert_eq!(parse_hexadecimal(pad(b"49 96 02 D2")).unwrap(), 1234567890);
+        assert_eq!(parse_hex("2A".into()).unwrap(), 42);
+        assert_eq!(parse_hex("7 5B CD 15".into()).unwrap(), 123456789);
+        assert_eq!(parse_hex("49 96 02 D2".into()).unwrap(), 1234567890);
         assert_eq!(
-            parse_hexadecimal(pad(b"E4 8E DC D2 E4 8E DC D2")).unwrap(),
+            parse_hex("E4 8E DC D2 E4 8E DC D2".into()).unwrap(),
             16469343685676293330
         );
-        assert_eq!(parse_hexadecimal(pad(b"AFFEEE")).unwrap(), 11534062);
+        assert_eq!(parse_hex("AFFEEE".into()).unwrap(), 11534062);
 
-        assert_eq!(parse_binary(pad(b"1111")).unwrap(), 15);
-        assert_eq!(parse_binary(pad(b"11111111")).unwrap(), 255);
-        assert_eq!(parse_binary(pad(b"11  1 1  1 1 1 1")).unwrap(), 255);
-        assert_eq!(parse_binary(pad(b"10 1010")).unwrap(), 42);
-        assert_eq!(parse_binary(pad(b"1111 0010")).unwrap(), 242);
-        assert_eq!(parse_binary(pad(b"1 0101 1110 0011 0110")).unwrap(), 89654);
+        assert_eq!(parse_bin("1111".into()).unwrap(), 15);
+        assert_eq!(parse_bin("11111111".into()).unwrap(), 255);
+        assert_eq!(parse_bin("11  1 1  1 1 1 1".into()).unwrap(), 255);
+        assert_eq!(parse_bin("10 1010".into()).unwrap(), 42);
+        assert_eq!(parse_bin("1111 0010".into()).unwrap(), 242);
+        assert_eq!(parse_bin("1 0101 1110 0011 0110".into()).unwrap(), 89654);
     }
 
     fn prep(text: Result<[u8; NUMBER_STRING_WIDTH]>) -> String {

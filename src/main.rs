@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Result;
+use crossterm::clipboard::CopyToClipboard;
 use crossterm::{
     cursor,
     event::{
@@ -19,8 +20,9 @@ use crossterm::{
 
 use column::{Column, Cursor, Row};
 use format::{
-    format_automatic, hex_to_u8_char, insert_characters_automatic, parse_automatic,
-    remove_character_automatic, replace_characters_automatic, NUMBER_STRING_WIDTH,
+    format_automatic, hex_to_u8_char, insert_characters_automatic, is_valid_character_automatic,
+    parse_user_input, remove_character_automatic, replace_characters_automatic,
+    NUMBER_STRING_WIDTH,
 };
 
 mod column;
@@ -205,6 +207,11 @@ impl App {
                         // yank
                         KeyCode::Char('y') => {
                             // TODO copy to clipboard
+                            let (num, _) = self.get_current_column();
+                            // seems this does not work with gnome terminal...
+                            // TODO right now we just copy the "number" but i think it should copy the correct formatting of the line as well
+                            self.w
+                                .execute(CopyToClipboard::to_primary_from(num.to_string()))?;
                         }
                         // paste
                         KeyCode::Char('p') => {
@@ -279,12 +286,13 @@ impl App {
                 }
 
                 Event::Paste(data) => {
-                    // TODO should be helper funcition
-                    // should handle hex or bin prefix (overwrites cursor position)
-                    let trim = data.as_bytes().trim_ascii();
-                    let (num, _) = self.get_current_column();
-                    let num = replace_characters_automatic(num, self.cursor, trim);
-                    self.set_number(num);
+                    // overwrites current number
+                    let (_, cursor) = self.get_current_column();
+                    let row = cursor.row;
+                    let number = parse_user_input(&data, row);
+                    if let Some(number) = number {
+                        self.set_number(number);
+                    }
                 }
                 _ => {}
             }
@@ -293,12 +301,17 @@ impl App {
     }
 
     fn handle_char_input(&mut self, char: char) {
+        let (num, cursor) = self.get_current_column();
+        let row = cursor.row;
+        // skip input that is currently not valid
+        if !is_valid_character_automatic(char as u8, row) {
+            return;
+        }
+
         if self.insert {
-            let (num, _) = self.get_current_column();
             let num = insert_characters_automatic(num, self.cursor, &[char as u8]);
             self.set_number(num);
         } else {
-            let (num, _) = self.get_current_column();
             let num = replace_characters_automatic(num, self.cursor, &[char as u8]);
             self.set_number(num);
         }
@@ -422,6 +435,7 @@ impl App {
             .queue(style::Print(" |"))?
             .queue(cursor::MoveToNextLine(1))?
             .queue(style::Print("BIN 48| "))?
+            // .queue(style::Print("BIN 00| "))?
             .queue(style::PrintStyledContent(
                 "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
             ))?
@@ -432,6 +446,7 @@ impl App {
             .queue(style::Print(" |"))?
             .queue(cursor::MoveToNextLine(1))?
             .queue(style::Print("BIN 32| "))?
+            // .queue(style::Print("BIN 16| "))?
             .queue(style::PrintStyledContent(
                 "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
             ))?
@@ -442,6 +457,7 @@ impl App {
             .queue(style::Print(" |"))?
             .queue(cursor::MoveToNextLine(1))?
             .queue(style::Print("BIN 16| "))?
+            // .queue(style::Print("BIN 32| "))?
             .queue(style::PrintStyledContent(
                 "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
             ))?
@@ -452,6 +468,7 @@ impl App {
             .queue(style::Print(" |"))?
             .queue(cursor::MoveToNextLine(1))?
             .queue(style::Print("BIN 00| "))?
+            // .queue(style::Print("BIN 48| "))?
             .queue(style::PrintStyledContent(
                 "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
             ))?
@@ -466,7 +483,7 @@ impl App {
 
 fn main() {
     std::env::set_var("RUST_BACKTRACE", "1");
-    // TODO have a look at signal handler do correctly handle ctrl-c
+    // TODO have a look at signal handler to correctly handle ctrl-c
 
     let mut app = App::init().expect("Error during initialization");
     let res = app.run();

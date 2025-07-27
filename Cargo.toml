@@ -5,5 +5,5 @@ authors = ["Hengo <leitner.andi@googlemail.com>"]
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.95"
-crossterm = "0.28.1"
+anyhow = "1.0.98"
+crossterm = { version = "0.29.0", features = ["osc52"] }

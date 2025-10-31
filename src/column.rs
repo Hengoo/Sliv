@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::{cursor, QueueableCommand};
+use crossterm::{QueueableCommand, cursor};
 
 use crate::{UNumber, Writer};
 use std::{ops, time::Instant};
@@ -72,7 +72,7 @@ pub const LOOKUP_TABLE: [[u8; 28]; 9] = [
 
 // Allow dead code because we construct the enum via ways the static code analysis does not know of
 #[allow(dead_code)]
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Row {
     UpperPadding = 0,
     Decimal,
@@ -94,7 +94,7 @@ impl TryFrom<u8> for Row {
         if v > LAST_ROW as u8 {
             Err(())
         } else {
-            unsafe { std::mem::transmute::<u8, std::result::Result<Row, ()>>(v) }
+            unsafe { std::mem::transmute::<u8, std::result::Result<Self, ()>>(v) }
         }
     }
 }
@@ -106,7 +106,7 @@ impl TryFrom<usize> for Row {
         if v > LAST_ROW as usize {
             Err(())
         } else {
-            unsafe { std::mem::transmute::<u8, std::result::Result<Row, ()>>(v as u8) }
+            unsafe { std::mem::transmute::<u8, std::result::Result<Self, ()>>(v as u8) }
         }
     }
 }
@@ -116,11 +116,7 @@ impl ops::Add<u8> for Row {
 
     fn add(self, rhs: u8) -> Self::Output {
         let num = (self as u8).saturating_add(rhs);
-        if let Ok(output) = Self::try_from(num) {
-            output
-        } else {
-            LAST_ROW
-        }
+        Self::try_from(num).map_or(LAST_ROW, |output| output)
     }
 }
 
@@ -141,16 +137,12 @@ impl ops::Sub<u8> for Row {
 
     fn sub(self, rhs: u8) -> Self::Output {
         let num = (self as u8).saturating_sub(rhs);
-        if let Ok(output) = Self::try_from(num) {
-            output
-        } else {
-            // Row does not have holes, so this should never happen, assuming the input enum was valid
-            unreachable!()
-        }
+        // Row does not have holes, so the unreachable should never happen, assuming the input enum was valid
+        Self::try_from(num).unwrap_or_else(|()| unreachable!())
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Cursor {
     pub col: u8,
     pub row: Row,
@@ -164,9 +156,8 @@ impl Cursor {
     // fix by moving in left direction if possible
     fn fix_left(&mut self) {
         match LOOKUP_TABLE[self.row as usize][self.text_pos as usize] {
-            SC => self.text_pos -= 1,
+            SC | ER => self.text_pos -= 1,
             EL => self.text_pos += 1,
-            ER => self.text_pos -= 1,
             UJ => {
                 self.text_pos = 26;
                 self.row -= 1;
@@ -186,8 +177,7 @@ impl Cursor {
     // fix by moving in right direction if possible
     pub fn fix_right(&mut self) {
         match LOOKUP_TABLE[self.row as usize][self.text_pos as usize] {
-            SC => self.text_pos += 1,
-            EL => self.text_pos += 1,
+            SC | EL => self.text_pos += 1,
             ER => self.text_pos -= 1,
             UJ => {
                 self.text_pos += 1;
@@ -225,14 +215,14 @@ impl Cursor {
         self.fix_right();
     }
 
-    pub fn swap_column(&mut self) {
+    pub const fn swap_column(&mut self) {
         self.col += 1;
         self.col %= 2;
     }
 
-    pub fn set_terminal_cursor(&self, w: &mut Writer) -> Result<()> {
+    pub fn set_terminal_cursor(self, w: &mut Writer) -> Result<()> {
         let y = self.row as u16 + 1;
-        let x = 7 + self.col as u16 * 29 + self.text_pos as u16;
+        let x = 7 + u16::from(self.col) * 29 + u16::from(self.text_pos);
         w.queue(cursor::MoveTo(x - 1, y))?;
         // Experimenting with changing background color -> changes it for everything in the future
         // w.queue(style::SetBackgroundColor(style::Color::Red))?;
@@ -247,7 +237,7 @@ impl Default for Cursor {
         // we have 1 layer of padding around the numbers block
         // -> start at 1,1, and end at:26,26
         // the above lookup datle goes to 27,27
-        Cursor {
+        Self {
             col: 0,
             row: Row::Decimal,
             text_pos: 26,
@@ -299,7 +289,7 @@ impl Column {
             .expect("something went wrong with history index math")
     }
 
-    pub fn undo(&mut self) {
+    pub const fn undo(&mut self) {
         self.index = self.index.saturating_sub(1);
     }
 
@@ -505,10 +495,10 @@ mod tests {
         assert_eq!(cursor.row, Row::Decimal);
         assert_eq!(cursor.text_pos, 1);
 
-        for i in 0..19 {
+        for i in 0u8..19u8 {
             cursor.move_right();
             assert_eq!(cursor.row, Row::Decimal);
-            assert_eq!(cursor.text_pos, 2 + i + ((i + 2) / 3));
+            assert_eq!(cursor.text_pos, 2 + i + i.div_ceil(3));
         }
 
         assert_eq!(cursor.row, Row::Decimal);

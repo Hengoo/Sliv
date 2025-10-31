@@ -1,11 +1,16 @@
 [package]
-name = "hexit"
+name = "sliv"
 version = "0.1.0"
-authors = ["Hengo <leitner.andi@googlemail.com>"]
-edition = "2021"
-
-# TODO maybe update edition (changed some unsafe)
+edition = "2024"
+authors = ["Andreas Leitner <leitner.andi@googlemail.com>"]
+description = "Sliv is a \"Simple Lightweight Integer Visualization\" tool for the console"
+repository = "https://github.com/Hengoo/Sliv"
+readme = "readme.md"
+categories = ["command-line-utilities", "Visualization"]
+keywords = ["binary", "hex", "cli", "terminal"]
+exclude = [".github/*"]
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-anyhow = "1.0.98"
+anyhow = "1.0.100"
 crossterm = { version = "0.29.0", features = ["osc52"] }

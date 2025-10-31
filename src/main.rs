@@ -1,3 +1,10 @@
+#![warn(
+    clippy::all,
+    // clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo,
+)]
+
 use core::str;
 use std::result::Result::Ok;
 use std::{
@@ -8,21 +15,20 @@ use std::{
 use anyhow::Result;
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::{
-    cursor,
+    ExecutableCommand, QueueableCommand, cursor,
     event::{
-        read, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, read,
     },
     style::{self, Stylize},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand, QueueableCommand,
 };
 
 use column::{Column, Cursor, Row};
 use format::{
-    format_automatic, hex_to_u8_char, insert_characters_automatic, is_valid_character_automatic,
-    parse_user_input, remove_character_automatic, replace_characters_automatic,
-    NUMBER_STRING_WIDTH,
+    NUMBER_STRING_WIDTH, format_automatic, hex_to_u8_char, insert_characters_automatic,
+    is_valid_character_automatic, parse_user_input, remove_character_automatic,
+    replace_characters_automatic,
 };
 
 mod column;
@@ -60,7 +66,7 @@ struct App {
 }
 
 impl App {
-    fn init() -> Result<App> {
+    fn init() -> Result<Self> {
         terminal::enable_raw_mode()?;
         let mut w = std::io::stdout();
         w.execute(EnterAlternateScreen)?
@@ -70,7 +76,7 @@ impl App {
         let left = Column::new(0);
         let right = Column::new(1);
 
-        Ok(App {
+        Ok(Self {
             w,
             tabs: vec![[left, right]],
             tab_index: 0,
@@ -155,12 +161,7 @@ impl App {
                         KeyCode::Right => self.cursor.move_right(),
                         KeyCode::Up => self.cursor.move_up(),
                         KeyCode::Down => self.cursor.move_down(),
-                        KeyCode::Home => self.cursor.swap_column(),
-                        KeyCode::End => self.cursor.swap_column(),
-                        KeyCode::Tab => {
-                            self.cursor.swap_column();
-                        }
-                        KeyCode::BackTab => {
+                        KeyCode::Home | KeyCode::End | KeyCode::Tab | KeyCode::BackTab => {
                             self.cursor.swap_column();
                         }
                         // go tab to right
@@ -222,11 +223,11 @@ impl App {
                             // TODO paste from clipboard
                             // paste the numbers at position (guess char by char. Make sure history is not polluted)
                         }
-                        KeyCode::Char('<') | KeyCode::Char('l') => {
+                        KeyCode::Char('<' | 'l') => {
                             let (num, _) = self.get_current_column();
                             self.set_number(num.shl(1));
                         }
-                        KeyCode::Char('>') | KeyCode::Char('r') => {
+                        KeyCode::Char('>' | 'r') => {
                             let (num, _) = self.get_current_column();
                             self.set_number(num.shr(1));
                         }
@@ -281,7 +282,7 @@ impl App {
                     } else {
                         self.cursor.text_pos = (tmp - NUMBER_DIGIT_WIDTH - 3).clamp(1, 26);
                         self.cursor.col = 1;
-                    };
+                    }
                     self.cursor.fix_right();
                 }
 
@@ -353,7 +354,7 @@ impl App {
         // avoid writing leading spaces so we can keep the background
         let trim = text.trim_ascii_start();
         w.queue(cursor::MoveTo(
-            col as u16 + NUMBER_DIGIT_WIDTH as u16 - trim.len() as u16,
+            u16::from(col) + u16::from(NUMBER_DIGIT_WIDTH) - trim.len() as u16,
             row as u16,
         ))?
         .queue(style::Print(str::from_utf8(trim)?))?;
@@ -368,10 +369,10 @@ impl App {
             let row = Row::try_from(i).unwrap();
             let text = format_automatic(number, row);
             // Signed is allowed to fail
-            if row == Row::Signed {
-                if let Ok(text) = text {
-                    Self::write_trimmed(w, text, col, row + 1)?;
-                }
+            if row == Row::Signed
+                && let Ok(text) = text
+            {
+                Self::write_trimmed(w, text, col, row + 1)?;
             }
             Self::write_trimmed(w, text?, col, row + 1)?;
         }
@@ -411,7 +412,7 @@ impl App {
 
     fn draw_background(w: &mut Writer) -> Result<()> {
         // fist row is reserved for tabs
-        w.queue(cursor::MoveTo(0, NUMBER_START_Y as u16 - 1))?
+        w.queue(cursor::MoveTo(0, u16::from(NUMBER_START_Y) - 1))?
             .queue(style::Print(
                 "=================================================================",
             ))?
@@ -482,7 +483,7 @@ impl App {
 }
 
 fn main() {
-    std::env::set_var("RUST_BACKTRACE", "1");
+    unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     // TODO have a look at signal handler to correctly handle ctrl-c
 
     let mut app = App::init().expect("Error during initialization");

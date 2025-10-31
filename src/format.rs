@@ -1,8 +1,8 @@
 use crate::{
-    column::{self, Cursor, Row},
     INumber, UNumber,
+    column::{self, Cursor, Row},
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use core::str;
 use std::{io::Write, ops::Shl};
 
@@ -18,7 +18,7 @@ use std::{io::Write, ops::Shl};
 pub const NUMBER_STRING_WIDTH: usize = 32;
 
 #[allow(dead_code)]
-pub fn char_to_number(char: char) -> UNumber {
+pub const fn char_to_number(char: char) -> UNumber {
     match char {
         '0' => 0,
         '1' => 1,
@@ -40,7 +40,7 @@ pub fn char_to_number(char: char) -> UNumber {
     }
 }
 
-pub fn u8_char_to_number(char: u8) -> UNumber {
+pub const fn u8_char_to_number(char: u8) -> UNumber {
     match char {
         b'0' => 0,
         b'1' => 1,
@@ -63,7 +63,7 @@ pub fn u8_char_to_number(char: u8) -> UNumber {
 }
 
 // Translates one hex number (4bit) to a u8 char
-pub fn hex_to_u8_char(number: UNumber, offset: u32) -> u8 {
+pub const fn hex_to_u8_char(number: UNumber, offset: u32) -> u8 {
     match (number >> offset) & 0xF {
         0x0 => b'0',
         0x1 => b'1',
@@ -87,7 +87,7 @@ pub fn hex_to_u8_char(number: UNumber, offset: u32) -> u8 {
 
 // Convert to negative interpretaton IF it aligns with one of
 // the common integer sizes (i8, i16. i32, i64, i128)
-pub fn handle_negative(number: UNumber) -> INumber {
+pub const fn handle_negative(number: UNumber) -> INumber {
     if number == 0 {
         return number as INumber;
     }
@@ -104,7 +104,7 @@ pub fn handle_negative(number: UNumber) -> INumber {
 }
 
 // First tries to interpret as negative, if failed, convert to negative
-pub fn make_negative(number: UNumber) -> INumber {
+pub const fn make_negative(number: UNumber) -> INumber {
     let mut number = handle_negative(number);
     if number.is_positive() {
         // this always works, because if fist bit is set (means this operation fails)
@@ -193,7 +193,7 @@ pub fn format_automatic(number: UNumber, row: Row) -> Result<[u8; NUMBER_STRING_
         Row::Hex => format_hexadecimal(number),
         Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => {
             // bin is split in 4 numbers to fit on screen
-            let mask = u16::MAX as UNumber;
+            let mask = UNumber::from(u16::MAX);
             let num_partial_row = 4 - (UNumber::BITS - number.leading_zeros()) as u8 / 16;
             let i = (row - 4) as u8;
             let mut text = if i >= num_partial_row {
@@ -221,7 +221,7 @@ fn parse_decimal(mut input: String) -> Option<UNumber> {
     if input.starts_with("0x")
         || input.starts_with("0b")
         || input.starts_with("0o")
-        || input.starts_with("-")
+        || input.starts_with('-')
     {
         return None;
     }
@@ -239,7 +239,7 @@ fn parse_signed(mut input: String) -> Option<UNumber> {
 }
 
 fn parse_hex(mut input: String) -> Option<UNumber> {
-    if input.starts_with("0b") || input.starts_with("0o") || input.starts_with("-") {
+    if input.starts_with("0b") || input.starts_with("0o") || input.starts_with('-') {
         return None;
     }
     input.retain(|c| c.is_ascii_hexdigit());
@@ -247,7 +247,7 @@ fn parse_hex(mut input: String) -> Option<UNumber> {
 }
 
 fn parse_bin(mut input: String) -> Option<UNumber> {
-    if input.starts_with("0x") || input.starts_with("0o") || input.starts_with("-") {
+    if input.starts_with("0x") || input.starts_with("0o") || input.starts_with('-') {
         return None;
     }
     input.retain(|c| c.is_digit(2));
@@ -255,7 +255,7 @@ fn parse_bin(mut input: String) -> Option<UNumber> {
 }
 
 fn parse_oct(mut input: String) -> Option<UNumber> {
-    if input.starts_with("0b") || input.starts_with("0x") || input.starts_with("-") {
+    if input.starts_with("0b") || input.starts_with("0x") || input.starts_with('-') {
         return None;
     }
     input.retain(|c| c.is_digit(8));
@@ -273,11 +273,11 @@ pub fn parse_user_input(input: &str, row: Row) -> Option<UNumber> {
         _ => None,
     };
     result
-        .or(parse_decimal(input.into()))
-        .or(parse_signed(input.into()))
-        .or(parse_hex(input.into()))
-        .or(parse_bin(input.into()))
-        .or(parse_oct(input.into()))
+        .or_else(|| parse_decimal(input.into()))
+        .or_else(|| parse_signed(input.into()))
+        .or_else(|| parse_hex(input.into()))
+        .or_else(|| parse_bin(input.into()))
+        .or_else(|| parse_oct(input.into()))
 }
 
 pub fn replace_characters_automatic(number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
@@ -487,7 +487,7 @@ pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) ->
 }
 
 // valid characters that are actualy "numbers" (excluding '-')
-pub fn is_valid_character_automatic(char: u8, row: Row) -> bool {
+pub const fn is_valid_character_automatic(char: u8, row: Row) -> bool {
     match row {
         Row::Decimal | Row::Signed => char.is_ascii_digit(),
         Row::Hex => char.is_ascii_hexdigit(),
@@ -534,20 +534,23 @@ mod tests {
 
     #[test]
     fn test_parse() {
-        std::env::set_var("RUST_BACKTRACE", "1");
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
         assert_eq!(parse_decimal("123".into()).unwrap(), 123);
         assert_eq!(parse_decimal("1,2,3".into()).unwrap(), 123);
         assert_eq!(parse_decimal("0000,,,123,,".into()).unwrap(), 123);
-        assert_eq!(parse_decimal("1,234,567,890".into()).unwrap(), 1234567890);
+        assert_eq!(
+            parse_decimal("1,234,567,890".into()).unwrap(),
+            1_234_567_890
+        );
         assert_eq!(
             parse_decimal("16,469,343,685,676,293,330".into()).unwrap(),
-            16469343685676293330
+            16_469_343_685_676_293_330
         );
 
         assert_eq!(parse_signed("123".into()).unwrap(), 123);
         assert_eq!(parse_signed("1,2,3".into()).unwrap(), 123);
         assert_eq!(parse_signed(",,,123,,".into()).unwrap(), 123);
-        assert_eq!(parse_signed("1,234,567,890".into()).unwrap(), 1234567890);
+        assert_eq!(parse_signed("1,234,567,890".into()).unwrap(), 1_234_567_890);
         assert_eq!(handle_negative(parse_signed("-123".into()).unwrap()), -123);
         assert_eq!(
             handle_negative(parse_signed("-1,2,3".into()).unwrap()),
@@ -559,21 +562,21 @@ mod tests {
         );
         assert_eq!(
             handle_negative(parse_signed("-1,234,567,890".into()).unwrap()),
-            -1234567890
+            -1_234_567_890
         );
         assert_eq!(
             handle_negative(parse_signed("-1,977,400,388,033,258,286".into()).unwrap()),
-            -1977400388033258286
+            -1_977_400_388_033_258_286
         );
 
         assert_eq!(parse_hex("2A".into()).unwrap(), 42);
-        assert_eq!(parse_hex("7 5B CD 15".into()).unwrap(), 123456789);
-        assert_eq!(parse_hex("49 96 02 D2".into()).unwrap(), 1234567890);
+        assert_eq!(parse_hex("7 5B CD 15".into()).unwrap(), 123_456_789);
+        assert_eq!(parse_hex("49 96 02 D2".into()).unwrap(), 1_234_567_890);
         assert_eq!(
             parse_hex("E4 8E DC D2 E4 8E DC D2".into()).unwrap(),
-            16469343685676293330
+            16_469_343_685_676_293_330
         );
-        assert_eq!(parse_hex("AFFEEE".into()).unwrap(), 11534062);
+        assert_eq!(parse_hex("AFFEEE".into()).unwrap(), 11_534_062);
 
         assert_eq!(parse_bin("1111".into()).unwrap(), 15);
         assert_eq!(parse_bin("11111111".into()).unwrap(), 255);
@@ -590,7 +593,7 @@ mod tests {
 
     #[test]
     fn test_format() {
-        std::env::set_var("RUST_BACKTRACE", "1");
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
         let num = 42;
         assert_eq!(prep(format_binary(num)), "10 1010");
         assert_eq!(prep(format_decimal(num)), "42");
@@ -601,7 +604,7 @@ mod tests {
         assert_eq!(prep(format_decimal(num)), "242");
         assert_eq!(prep(format_signed_decimal(num)), "-14");
         assert_eq!(prep(format_hexadecimal(num)), "F2");
-        let num = 123456789;
+        let num = 123_456_789;
         // this and below binary numbers do not fit in string
         // assert_eq!(
         //     prep(format_binary(num)),
@@ -610,7 +613,7 @@ mod tests {
         assert_eq!(prep(format_decimal(num)), "123,456,789");
         assert_eq!(prep(format_signed_decimal(num)), "123,456,789");
         assert_eq!(prep(format_hexadecimal(num)), "7 5B CD 15");
-        let num = 1234567890;
+        let num = 1_234_567_890;
         // assert_eq!(
         //     prep(format_binary(num)),
         //     "100 1001 1001 0110 0000 0010 1101 0010"
@@ -618,7 +621,7 @@ mod tests {
         assert_eq!(prep(format_decimal(num)), "1,234,567,890");
         assert_eq!(prep(format_signed_decimal(num)), "1,234,567,890");
         assert_eq!(prep(format_hexadecimal(num)), "49 96 02 D2");
-        let num = 3834567890;
+        let num = 3_834_567_890;
         // assert_eq!(
         //     prep(format_binary(num)),
         //     "1110 0100 1000 1110 1101 1100 1101 0010"
@@ -626,7 +629,7 @@ mod tests {
         assert_eq!(prep(format_decimal(num)), "3,834,567,890");
         assert_eq!(prep(format_signed_decimal(num)), "-460,399,406");
         assert_eq!(prep(format_hexadecimal(num)), "E4 8E DC D2");
-        let num = 16469343685676293330;
+        let num = 16_469_343_685_676_293_330;
         // assert_eq!(
         //     prep(format_binary(num)),
         //     "1110 0100 1000 1110 1101 1100 1101 0010 1110 0100 1000 1110 1101 1100 1101 0010"
@@ -641,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_replace() {
-        std::env::set_var("RUST_BACKTRACE", "1");
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
         let mut cursor = Cursor::default();
         // Unsigned
         let num = 51402;
@@ -649,14 +652,14 @@ mod tests {
         assert_eq!(replace_characters_automatic(num, cursor, b"00000"), 0);
         assert_eq!(
             replace_characters_automatic(num, cursor, b"2571640257"),
-            2571640257
+            2_571_640_257
         );
         assert_eq!(replace_characters_automatic(num, cursor, b"544"), 51544);
         cursor.move_left();
         cursor.move_left();
         cursor.move_left();
         assert_eq!(replace_characters_automatic(num, cursor, b"00"), 402);
-        assert_eq!(replace_characters_automatic(num, cursor, b"137"), 137402);
+        assert_eq!(replace_characters_automatic(num, cursor, b"137"), 137_402);
         cursor.text_pos = 1;
         assert_eq!(
             replace_characters_automatic(num, cursor, b"66"),
@@ -664,11 +667,11 @@ mod tests {
         );
         assert_eq!(
             replace_characters_automatic(num, cursor, b"1"),
-            10000000000000051402
+            10_000_000_000_000_051_402
         );
         assert_eq!(
             replace_characters_automatic(num, cursor, b"01"),
-            10000000000000051402
+            10_000_000_000_000_051_402
         );
         assert_eq!(
             replace_characters_automatic(num, cursor, b"2"),
@@ -689,7 +692,7 @@ mod tests {
         );
         assert_eq!(
             replace_characters_automatic(num as UNumber, cursor, b"2571640257") as INumber,
-            -2571640257
+            -2_571_640_257
         );
         assert_eq!(
             replace_characters_automatic(num as UNumber, cursor, b"544") as INumber,
@@ -704,7 +707,7 @@ mod tests {
         );
         assert_eq!(
             replace_characters_automatic(num as UNumber, cursor, b"137") as INumber,
-            -137402
+            -137_402
         );
         cursor.text_pos = 1;
         assert_eq!(
@@ -714,15 +717,15 @@ mod tests {
         cursor.text_pos = 2;
         assert_eq!(
             replace_characters_automatic(num as UNumber, cursor, b"1") as INumber,
-            -1000000000000051402
+            -1_000_000_000_000_051_402
         );
         assert_eq!(
             replace_characters_automatic(num as UNumber, cursor, b"9") as INumber,
-            -9000000000000051402
+            -9_000_000_000_000_051_402
         );
         assert_eq!(
             replace_characters_automatic(num as UNumber, cursor, b"09") as INumber,
-            -9000000000000051402
+            -9_000_000_000_000_051_402
         );
         assert_eq!(
             replace_characters_automatic(num as UNumber, cursor, b"10") as INumber,
@@ -730,34 +733,43 @@ mod tests {
         );
 
         // Hex
-        cursor = Default::default();
+        cursor = Cursor::default();
         cursor.move_down();
         cursor.move_down();
-        let num: UNumber = 0xabcdef;
-        assert_eq!(replace_characters_automatic(num, cursor, b"00"), 0xabcd00);
-        assert_eq!(replace_characters_automatic(num, cursor, b"16fa"), 0xab16fa);
+        let num: UNumber = 0xab_cdef;
+        assert_eq!(
+            replace_characters_automatic(num, cursor, b"00"),
+            0x00ab_cd00
+        );
+        assert_eq!(
+            replace_characters_automatic(num, cursor, b"16fa"),
+            0x00ab_16fa
+        );
         cursor.move_left();
-        assert_eq!(replace_characters_automatic(num, cursor, b"16fa"), 0xa16faf);
+        assert_eq!(
+            replace_characters_automatic(num, cursor, b"16fa"),
+            0x00a1_6faf
+        );
         cursor.move_left();
         cursor.move_left();
         cursor.move_left();
         assert_eq!(
             replace_characters_automatic(num, cursor, b"16fa"),
-            0x16facdef
+            0x16fa_cdef
         );
         cursor.text_pos = 5;
         assert_eq!(
             replace_characters_automatic(num, cursor, b"a"),
-            0xa00000000abcdef
+            0x0a00_0000_00ab_cdef
         );
         assert_eq!(
             replace_characters_automatic(num, cursor, b"ba"),
-            0xba00000000abcdef
+            0xba00_0000_00ab_cdef
         );
         // Leading zeroes should not cause overflow
         assert_eq!(
             replace_characters_automatic(num, cursor, b"0ba"),
-            0xba00000000abcdef
+            0xba00_0000_00ab_cdef
         );
         assert_eq!(
             replace_characters_automatic(num, cursor, b"1ba"),
@@ -765,7 +777,7 @@ mod tests {
         );
 
         // Bin
-        cursor = Default::default();
+        cursor = Cursor::default();
         cursor.move_down();
         cursor.move_down();
         cursor.move_down();
@@ -773,23 +785,23 @@ mod tests {
         cursor.move_down();
         cursor.move_down();
         cursor.move_down();
-        let num: UNumber = 0b1001100;
-        assert_eq!(replace_characters_automatic(num, cursor, b"11"), 0b1001111);
+        let num: UNumber = 0b100_1100;
+        assert_eq!(replace_characters_automatic(num, cursor, b"11"), 0b100_1111);
         assert_eq!(
             replace_characters_automatic(num, cursor, b"0000"),
-            0b1000000
+            0b100_0000
         );
         cursor.move_left();
         cursor.move_left();
         cursor.move_left();
-        assert_eq!(replace_characters_automatic(num, cursor, b"11"), 0b1011100);
+        assert_eq!(replace_characters_automatic(num, cursor, b"11"), 0b101_1100);
         cursor.move_up();
         cursor.move_up();
         cursor.move_up();
         cursor.text_pos = 9;
         assert_eq!(
             replace_characters_automatic(num, cursor, b"11"),
-            0b1100000000000000000000000000000000000000000000000000000001001100
+            0b1100_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0100_1100
         );
         assert_eq!(
             replace_characters_automatic(num, cursor, b"111"),
@@ -797,13 +809,13 @@ mod tests {
         );
         assert_eq!(
             replace_characters_automatic(num, cursor, b"011"),
-            0b1100000000000000000000000000000000000000000000000000000001001100
+            0b1100_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0100_1100
         );
     }
 
     #[test]
     fn test_shift() {
-        std::env::set_var("RUST_BACKTRACE", "1");
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
         // Unsigned
         let mut cursor = Cursor::default();
         let mut num = 42;
@@ -813,13 +825,13 @@ mod tests {
         cursor.move_left();
         assert_eq!(shift_characters_automatic(num, cursor, 3), 40002);
         assert_eq!(shift_characters_automatic(num, cursor, -1), 4);
-        num = 6402155412;
+        num = 6_402_155_412;
         cursor.move_left();
-        assert_eq!(shift_characters_automatic(num, cursor, 0), 6402155412);
-        assert_eq!(shift_characters_automatic(num, cursor, 1), 64021554012);
-        assert_eq!(shift_characters_automatic(num, cursor, -1), 640215542);
-        assert_eq!(shift_characters_automatic(num, cursor, -2), 64021554);
-        assert_eq!(shift_characters_automatic(num, cursor, -3), 6402155);
+        assert_eq!(shift_characters_automatic(num, cursor, 0), 6_402_155_412);
+        assert_eq!(shift_characters_automatic(num, cursor, 1), 64_021_554_012);
+        assert_eq!(shift_characters_automatic(num, cursor, -1), 640_215_542);
+        assert_eq!(shift_characters_automatic(num, cursor, -2), 64_021_554);
+        assert_eq!(shift_characters_automatic(num, cursor, -3), 6_402_155);
         assert_eq!(shift_characters_automatic(num, cursor, -9), 6);
         assert_eq!(shift_characters_automatic(num, cursor, -10), 0);
         assert_eq!(shift_characters_automatic(num, cursor, -11), 0);
@@ -840,33 +852,33 @@ mod tests {
         cursor.move_left();
         assert_eq!(
             shift_characters_automatic(num, cursor, 3) as INumber,
-            -40002_i64
+            -40002i64
         );
         assert_eq!(
             shift_characters_automatic(num, cursor, -1) as INumber,
             -4_i64
         );
-        num = (-6402155412_i64) as UNumber;
+        num = (-6_402_155_412i64) as UNumber;
         cursor.move_left();
         assert_eq!(
             shift_characters_automatic(num, cursor, 0) as INumber,
-            -6402155412
+            -6_402_155_412
         );
         assert_eq!(
             shift_characters_automatic(num, cursor, 1) as INumber,
-            -64021554012
+            -64_021_554_012
         );
         assert_eq!(
             shift_characters_automatic(num, cursor, -1) as INumber,
-            -640215542
+            -640_215_542
         );
         assert_eq!(
             shift_characters_automatic(num, cursor, -2) as INumber,
-            -64021554
+            -64_021_554
         );
         assert_eq!(
             shift_characters_automatic(num, cursor, -3) as INumber,
-            -6402155
+            -6_402_155
         );
         assert_eq!(shift_characters_automatic(num, cursor, -9) as INumber, -6);
         assert_eq!(shift_characters_automatic(num, cursor, -10), 0);
@@ -885,19 +897,19 @@ mod tests {
         cursor = Cursor::default();
         cursor.move_down();
         cursor.move_down();
-        num = 0xabcdef;
-        assert_eq!(shift_characters_automatic(num, cursor, 1), 0xabcdef0);
+        num = 0x00ab_cdef;
+        assert_eq!(shift_characters_automatic(num, cursor, 1), 0x0abc_def0);
         assert_eq!(shift_characters_automatic(num, cursor, -1), 0xabcde);
-        assert_eq!(shift_characters_automatic(num, cursor, 3), 0xabcdef000);
+        assert_eq!(shift_characters_automatic(num, cursor, 3), 0x000a_bcde_f000);
         cursor.move_left();
-        assert_eq!(shift_characters_automatic(num, cursor, 1), 0xabcde0f);
+        assert_eq!(shift_characters_automatic(num, cursor, 1), 0x0abc_de0f);
         assert_eq!(shift_characters_automatic(num, cursor, -1), 0xabcde);
         cursor.move_left();
-        assert_eq!(shift_characters_automatic(num, cursor, 1), 0xabcd0ef);
+        assert_eq!(shift_characters_automatic(num, cursor, 1), 0x0abc_d0ef);
         assert_eq!(shift_characters_automatic(num, cursor, -1), 0xabcdf);
         assert_eq!(
             shift_characters_automatic(num, cursor, 10),
-            0xabcd0000000000ef
+            0xabcd_0000_0000_00ef
         );
         assert_eq!(shift_characters_automatic(num, cursor, 11), UNumber::MAX);
         assert_eq!(shift_characters_automatic(num, cursor, 21), UNumber::MAX);
@@ -906,7 +918,7 @@ mod tests {
         assert_eq!(shift_characters_automatic(num, cursor, -20), 0);
 
         // Bin
-        cursor = Default::default();
+        cursor = Cursor::default();
         cursor.move_down();
         cursor.move_down();
         cursor.move_down();
@@ -914,18 +926,18 @@ mod tests {
         cursor.move_down();
         cursor.move_down();
         cursor.move_down();
-        num = 0b1000100;
-        assert_eq!(shift_characters_automatic(num, cursor, 1), 0b10001000);
-        assert_eq!(shift_characters_automatic(num, cursor, -1), 0b100010);
-        assert_eq!(shift_characters_automatic(num, cursor, 3), 0b1000100000);
+        num = 0b100_0100;
+        assert_eq!(shift_characters_automatic(num, cursor, 1), 0b1000_1000);
+        assert_eq!(shift_characters_automatic(num, cursor, -1), 0b10_0010);
+        assert_eq!(shift_characters_automatic(num, cursor, 3), 0b10_0010_0000);
         cursor.move_left();
         cursor.move_left();
         cursor.move_left();
-        assert_eq!(shift_characters_automatic(num, cursor, 1), 0b10000100);
-        assert_eq!(shift_characters_automatic(num, cursor, -1), 0b100000);
+        assert_eq!(shift_characters_automatic(num, cursor, 1), 0b1000_0100);
+        assert_eq!(shift_characters_automatic(num, cursor, -1), 0b10_0000);
         assert_eq!(
             shift_characters_automatic(num, cursor, 10),
-            0b10000000000000100
+            0b1_0000_0000_0000_0100
         );
         assert_eq!(shift_characters_automatic(num, cursor, 61), UNumber::MAX);
         assert_eq!(shift_characters_automatic(num, cursor, 111), UNumber::MAX);

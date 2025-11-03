@@ -1,7 +1,6 @@
 use anyhow::Result;
-use crossterm::{QueueableCommand, cursor};
 
-use crate::{UNumber, Writer};
+use crate::{UNumber, backend::Backend};
 use std::{ops, time::Instant};
 
 // We are not using enums to keep the table somewhat readable
@@ -220,14 +219,10 @@ impl Cursor {
         self.col %= 2;
     }
 
-    pub fn set_terminal_cursor(self, w: &mut Writer) -> Result<()> {
+    pub fn set_terminal_cursor(self, b: &mut Backend) -> Result<()> {
         let y = self.row as u16 + 1;
         let x = 7 + u16::from(self.col) * 29 + u16::from(self.text_pos);
-        w.queue(cursor::MoveTo(x - 1, y))?;
-        // Experimenting with changing background color -> changes it for everything in the future
-        // w.queue(style::SetBackgroundColor(style::Color::Red))?;
-        w.queue(cursor::Show)?;
-        w.queue(cursor::MoveTo(x, y))?;
+        b.cursor_set(x, y);
         Ok(())
     }
 }

@@ -212,7 +212,7 @@ pub fn format_automatic(number: UNumber, row: Row) -> Result<[u8; NUMBER_STRING_
             }
             Ok(text)
         }
-        _ => Err(anyhow!("Wrong row?")),
+        _ => Err(anyhow!("Wrong row")),
     }
 }
 

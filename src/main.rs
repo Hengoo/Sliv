@@ -6,22 +6,13 @@
 )]
 
 use core::str;
+use std::ops::{Shl, Shr};
 use std::result::Result::Ok;
-use std::{
-    io::Write,
-    ops::{Shl, Shr},
-};
 
 use anyhow::Result;
-use crossterm::clipboard::CopyToClipboard;
 use crossterm::{
-    ExecutableCommand, QueueableCommand, cursor,
-    event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, read,
-    },
-    style::{self, Stylize},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, read},
+    style::{self},
 };
 
 use column::{Column, Cursor, Row};
@@ -31,18 +22,16 @@ use format::{
     replace_characters_automatic,
 };
 
+use crate::backend::Backend;
+
+mod backend;
 mod column;
 mod format;
-
-// TODO setup clippy
 
 // Numper type used in the hex comparison
 // UI is designed to handle u64
 pub type UNumber = u64;
 pub type INumber = i64;
-
-// not sure if i need to change this at some point.
-type Writer = std::io::Stdout;
 
 // currently we just have left/right
 // I doubt it makes sense to add support for 3 or more due to comparisons
@@ -58,7 +47,7 @@ const COLOR_UNUSED_DIGIT: style::Color = style::Color::DarkGrey;
 
 #[derive(Debug)]
 struct App {
-    w: Writer,
+    backend: Backend,
     tabs: Vec<[Column; COLUMN_COUNT]>,
     tab_index: usize,
     cursor: Cursor,
@@ -67,32 +56,16 @@ struct App {
 
 impl App {
     fn init() -> Result<Self> {
-        terminal::enable_raw_mode()?;
-        let mut w = std::io::stdout();
-        w.execute(EnterAlternateScreen)?
-            .execute(EnableBracketedPaste)?
-            .execute(EnableMouseCapture)?;
-
         let left = Column::new(0);
         let right = Column::new(1);
 
         Ok(Self {
-            w,
+            backend: Backend::new(100, 100)?,
             tabs: vec![[left, right]],
             tab_index: 0,
             cursor: Cursor::default(),
             insert: true,
         })
-    }
-
-    fn cleanup(mut self) -> Result<()> {
-        self.w.flush()?;
-        self.w
-            .execute(LeaveAlternateScreen)?
-            .execute(DisableMouseCapture)?
-            .execute(DisableBracketedPaste)?;
-        terminal::disable_raw_mode()?;
-        Ok(())
     }
 
     fn get_current_column(&self) -> (UNumber, Cursor) {
@@ -106,20 +79,20 @@ impl App {
     }
 
     fn redraw(&mut self) -> Result<()> {
-        self.w.queue(terminal::Clear(terminal::ClearType::All))?;
-        Self::draw_background(&mut self.w)?;
+        Self::draw_background(&mut self.backend)?;
         self.draw_tabs()?;
         for c in 0..COLUMN_COUNT {
             let (number, cursor) = self.tabs[self.tab_index][c].get();
-            Self::draw_column(&mut self.w, number, cursor.col)?;
+            Self::draw_column(&mut self.backend, number, cursor.col)?;
         }
         Ok(())
     }
 
     fn run(&mut self) -> Result<()> {
         self.redraw()?;
+        self.backend.flush(true)?;
 
-        // book keebing of last frames state so we know when to redraw
+        // book keeping of last frames state so we know when to redraw
         let mut last_tab_index = self.tab_index;
         let mut last_numbers = (
             self.tabs[self.tab_index][0].get().0,
@@ -130,17 +103,17 @@ impl App {
                 self.tabs[self.tab_index][0].get().0,
                 self.tabs[self.tab_index][1].get().0,
             );
-            // everything must be in one big queue, otherwise it seems we get flickering
-            if self.tab_index != last_tab_index || last_numbers != current_numbers {
+            // Avoid uneccessary redraws when the screen does not change
+            let redraw = self.tab_index != last_tab_index || last_numbers != current_numbers;
+            if redraw {
                 self.redraw()?;
             }
 
             last_tab_index = self.tab_index;
             last_numbers = current_numbers;
 
-            self.cursor.set_terminal_cursor(&mut self.w)?;
-
-            self.w.flush()?;
+            self.cursor.set_terminal_cursor(&mut self.backend)?;
+            self.backend.flush(redraw)?;
             match read()? {
                 Event::Key(event) => {
                     match event.code {
@@ -208,11 +181,11 @@ impl App {
                         // yank
                         KeyCode::Char('y') => {
                             // TODO copy to clipboard
-                            let (num, _) = self.get_current_column();
+                            // let (num, _) = self.get_current_column();
                             // seems this does not work with gnome terminal...
                             // TODO right now we just copy the "number" but i think it should copy the correct formatting of the line as well
-                            self.w
-                                .execute(CopyToClipboard::to_primary_from(num.to_string()))?;
+                            // self.backend.w
+                            //     .execute(CopyToClipboard::to_primary_from(num.to_string()))?;
                         }
                         // paste
                         KeyCode::Char('p') => {
@@ -346,23 +319,23 @@ impl App {
     }
 
     fn write_trimmed(
-        w: &mut Writer,
+        b: &mut Backend,
         text: [u8; NUMBER_STRING_WIDTH],
         col: u8,
         row: Row,
     ) -> Result<()> {
         // avoid writing leading spaces so we can keep the background
         let trim = text.trim_ascii_start();
-        w.queue(cursor::MoveTo(
+        b.cursor_set(
             u16::from(col) + u16::from(NUMBER_DIGIT_WIDTH) - trim.len() as u16,
             row as u16,
-        ))?
-        .queue(style::Print(str::from_utf8(trim)?))?;
+        );
+        b.print(str::from_utf8(trim)?)?;
 
         Ok(())
     }
 
-    fn draw_column(w: &mut Writer, number: UNumber, column_index: u8) -> Result<()> {
+    fn draw_column(b: &mut Backend, number: UNumber, column_index: u8) -> Result<()> {
         let col = NUMBER_START_X + column_index * { NUMBER_DIGIT_WIDTH + 3 };
 
         for i in 1u8..8u8 {
@@ -372,16 +345,15 @@ impl App {
             if row == Row::Signed
                 && let Ok(text) = text
             {
-                Self::write_trimmed(w, text, col, row + 1)?;
+                Self::write_trimmed(b, text, col, row + 1)?;
             }
-            Self::write_trimmed(w, text?, col, row + 1)?;
+            Self::write_trimmed(b, text?, col, row + 1)?;
         }
         Ok(())
     }
 
     fn draw_tabs(&mut self) -> Result<()> {
-        let w = &mut self.w;
-        w.queue(cursor::MoveTo(0, 0))?;
+        self.backend.cursor_set(0, 0);
         for t in 0..self.tabs.len() {
             let mut text = *b"     |     ";
             let [left, right] = &self.tabs[t];
@@ -399,85 +371,54 @@ impl App {
             if t == self.tab_index {
                 text[0] = b'/';
                 text[10] = b'\\';
-                w.queue(style::Print(str::from_utf8(&text)?))?;
+                self.backend.print(str::from_utf8(&text)?)?;
             } else {
-                w.queue(style::PrintStyledContent(
-                    str::from_utf8(&text)?.with(COLOR_UNUSED_DIGIT),
-                ))?;
+                self.backend
+                    .print_with_color(str::from_utf8(&text)?, COLOR_UNUSED_DIGIT)?;
             }
         }
 
         Ok(())
     }
 
-    fn draw_background(w: &mut Writer) -> Result<()> {
+    fn draw_background(b: &mut Backend) -> Result<()> {
         // fist row is reserved for tabs
-        w.queue(cursor::MoveTo(0, u16::from(NUMBER_START_Y) - 1))?
-            .queue(style::Print(
-                "=================================================================",
-            ))?
-            .queue(cursor::MoveToNextLine(1))?
-            .queue(style::Print(
-                "DEC   |                            |                            |",
-            ))?
-            .queue(cursor::MoveToNextLine(1))?
-            .queue(style::Print(
-                "SIGNED|                            |                            |",
-            ))?
-            .queue(cursor::MoveToNextLine(1))?
-            .queue(style::Print("HEX   | "))?
-            .queue(style::PrintStyledContent(
-                "   xx xx xx xx xx xx xx xx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" | "))?
-            .queue(style::PrintStyledContent(
-                "   xx xx xx xx xx xx xx xx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" |"))?
-            .queue(cursor::MoveToNextLine(1))?
-            .queue(style::Print("BIN 48| "))?
-            // .queue(style::Print("BIN 00| "))?
-            .queue(style::PrintStyledContent(
-                "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" | "))?
-            .queue(style::PrintStyledContent(
-                "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" |"))?
-            .queue(cursor::MoveToNextLine(1))?
-            .queue(style::Print("BIN 32| "))?
-            // .queue(style::Print("BIN 16| "))?
-            .queue(style::PrintStyledContent(
-                "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" | "))?
-            .queue(style::PrintStyledContent(
-                "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" |"))?
-            .queue(cursor::MoveToNextLine(1))?
-            .queue(style::Print("BIN 16| "))?
-            // .queue(style::Print("BIN 32| "))?
-            .queue(style::PrintStyledContent(
-                "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" | "))?
-            .queue(style::PrintStyledContent(
-                "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" |"))?
-            .queue(cursor::MoveToNextLine(1))?
-            .queue(style::Print("BIN 00| "))?
-            // .queue(style::Print("BIN 48| "))?
-            .queue(style::PrintStyledContent(
-                "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" | "))?
-            .queue(style::PrintStyledContent(
-                "       xxxx xxxx xxxx xxxx".with(COLOR_UNUSED_DIGIT),
-            ))?
-            .queue(style::Print(" |"))?;
+        b.cursor_set(0, u16::from(NUMBER_START_Y) - 1);
+        b.print("=================================================================")?;
+        b.cursor_move_to_next_line(1);
+        b.print("DEC   |                            |                            |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("SIGNED|                            |                            |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("HEX   | ")?;
+        b.print_with_color("   xx xx xx xx xx xx xx xx", COLOR_UNUSED_DIGIT)?;
+        b.print(" | ")?;
+        b.print_with_color("   xx xx xx xx xx xx xx xx", COLOR_UNUSED_DIGIT)?;
+        b.print(" |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("BIN 48| ")?;
+        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print(" | ")?;
+        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print(" |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("BIN 32| ")?;
+        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print(" | ")?;
+        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print(" |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("BIN 16| ")?;
+        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print(" | ")?;
+        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print(" |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("BIN 00| ")?;
+        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print(" | ")?;
+        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print(" |")?;
         Ok(())
     }
 }
@@ -488,6 +429,5 @@ fn main() {
 
     let mut app = App::init().expect("Error during initialization");
     let res = app.run();
-    app.cleanup().expect("Error during cleanup");
     res.expect("App failed somewhere in update loop");
 }

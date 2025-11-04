@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{UNumber, backend::Backend};
+use crate::{NUMBER_DIGIT_WIDTH, UNumber, backend::Backend};
 use std::{ops, time::Instant};
 
 // We are not using enums to keep the table somewhat readable
@@ -84,7 +84,7 @@ pub enum Row {
     LowerPadding,
 }
 
-const LAST_ROW: Row = Row::LowerPadding;
+pub const LAST_ROW: Row = Row::LowerPadding;
 
 impl TryFrom<u8> for Row {
     type Error = ();
@@ -153,12 +153,12 @@ pub struct Cursor {
 
 impl Cursor {
     // fix by moving in left direction if possible
-    fn fix_left(&mut self) {
+    pub fn fix_left(&mut self) {
         match LOOKUP_TABLE[self.row as usize][self.text_pos as usize] {
             SC | ER => self.text_pos -= 1,
             EL => self.text_pos += 1,
             UJ => {
-                self.text_pos = 26;
+                self.text_pos = NUMBER_DIGIT_WIDTH;
                 self.row -= 1;
             }
             DJ => {
@@ -219,11 +219,10 @@ impl Cursor {
         self.col %= 2;
     }
 
-    pub fn set_terminal_cursor(self, b: &mut Backend) -> Result<()> {
+    pub fn set_terminal_cursor(self, b: &mut Backend) {
         let y = self.row as u16 + 1;
         let x = 7 + u16::from(self.col) * 29 + u16::from(self.text_pos);
         b.cursor_set(x, y);
-        Ok(())
     }
 }
 
@@ -235,7 +234,7 @@ impl Default for Cursor {
         Self {
             col: 0,
             row: Row::Decimal,
-            text_pos: 26,
+            text_pos: NUMBER_DIGIT_WIDTH,
         }
     }
 }
@@ -271,7 +270,7 @@ impl Column {
         self.index += 1;
         self.history.truncate(self.index);
 
-        // TODO some logic to merge history entries
+        // TODO Need to decide if I want to have some logic to merge history entries
         //  recent edit, cursor not jumpet
         self.history.push((number, cursor));
         self.edit_time = Instant::now();

@@ -8,8 +8,18 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
+use crate::COLOR_UNUSED_DIGIT;
+
 // not sure if i need to change this at some point.
 pub type Writer = std::io::Stdout;
+
+#[derive(Debug, Clone, Copy)]
+pub enum CursorWriteMode {
+    // Use | cursor shifted to right by one (just visually)
+    Insert,
+    // Use block cursor
+    Replace,
+}
 
 /// Backend is mainly an abstraction layer over the rendering parts of crossterm.
 /// It stores the entire screen so we can compare sections and higlight differences
@@ -23,6 +33,7 @@ pub struct Backend {
     writer: Writer,
     size: Size,
     cursor: Pos,
+    cursor_write_mode: CursorWriteMode,
 
     buffer: Buffer,
     // Buffer from the previous frame
@@ -32,7 +43,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(width: u16, height: u16) -> Result<Self> {
+    pub fn new(width: u16, height: u16, cursor_write_mode: CursorWriteMode) -> Result<Self> {
         terminal::enable_raw_mode()?;
         let mut writer = std::io::stdout();
         writer
@@ -44,6 +55,7 @@ impl Backend {
             writer,
             size,
             cursor: Pos { x: 0, y: 0 },
+            cursor_write_mode,
             buffer: Buffer::new(size),
             buffer_last: Buffer::new(size),
             write_cache: String::with_capacity(size.width as usize),
@@ -143,6 +155,7 @@ impl Backend {
     }
 
     // Compares two cells and sets the background color if they don't show the same character
+    // Two background values are NOT different, even when they have differnt value
     pub fn set_background_color_if_different(
         &mut self,
         x0: u16,
@@ -153,9 +166,17 @@ impl Backend {
     ) -> Result<()> {
         let pos0 = Pos { x: x0, y: y0 };
         let pos1 = Pos { x: x1, y: y1 };
-        if self.buffer.pixels[pos0.get_flat_index(self.size)?].value
-            != self.buffer.pixels[pos1.get_flat_index(self.size)?].value
+        let pix0 = self.buffer.pixels[pos0.get_flat_index(self.size)?].clone();
+        let pix1 = self.buffer.pixels[pos1.get_flat_index(self.size)?].clone();
+
+        if (pix0.color == COLOR_UNUSED_DIGIT && pix1.color == COLOR_UNUSED_DIGIT)
+            || (pix0.color == COLOR_UNUSED_DIGIT && pix1.value == ' ')
+            || (pix0.value == ' ' && pix1.color == COLOR_UNUSED_DIGIT)
         {
+            return Ok(());
+        }
+
+        if pix0.value != pix1.value || pix0.color != pix1.color {
             self.buffer.pixels[pos0.get_flat_index(self.size)?].background_color = color;
             self.buffer.pixels[pos1.get_flat_index(self.size)?].background_color = color;
         }
@@ -166,12 +187,27 @@ impl Backend {
         self.cursor.x = x;
         self.cursor.y = y;
     }
+
     pub const fn cursor_move_to_next_line(&mut self, line_count: u16) {
         self.cursor.y += line_count;
         self.cursor.x = 0;
     }
+
+    pub const fn set_cursor_write_mode(&mut self, cursor_write_mode: CursorWriteMode) {
+        self.cursor_write_mode = cursor_write_mode;
+    }
+
     pub fn show_cursor_at(&mut self, x: u16, y: u16) -> Result<()> {
-        self.writer.queue(cursor::MoveTo(x, y))?;
+        match self.cursor_write_mode {
+            CursorWriteMode::Insert => {
+                self.writer.queue(cursor::SetCursorStyle::BlinkingBar)?;
+                self.writer.queue(cursor::MoveTo(x + 1, y))?;
+            }
+            CursorWriteMode::Replace => {
+                self.writer.queue(cursor::SetCursorStyle::BlinkingBlock)?;
+                self.writer.queue(cursor::MoveTo(x, y))?;
+            }
+        }
         self.writer.queue(cursor::Show)?;
         Ok(())
     }

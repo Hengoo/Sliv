@@ -9,7 +9,7 @@ use core::str;
 use std::ops::{Shl, Shr};
 use std::result::Result::Ok;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, read},
     style::{self},
@@ -21,8 +21,11 @@ use format::{
     is_valid_character_automatic, parse_user_input, remove_character_automatic,
     replace_characters_automatic,
 };
+use std::io::Write;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, CursorWriteMode};
+use crate::column::LAST_ROW;
+use crate::format::REAL_NUMBER_STRING_WIDTH;
 
 mod backend;
 mod column;
@@ -51,20 +54,23 @@ struct App {
     tabs: Vec<[Column; COLUMN_COUNT]>,
     tab_index: usize,
     cursor: Cursor,
-    insert: bool,
+    cursor_write_mode: CursorWriteMode,
+    force_redraw: bool,
 }
 
 impl App {
     fn init() -> Result<Self> {
         let left = Column::new(0);
         let right = Column::new(1);
+        let write_mode = CursorWriteMode::Insert;
 
         Ok(Self {
-            backend: Backend::new(100, 100)?,
+            backend: Backend::new(100, 100, write_mode)?,
             tabs: vec![[left, right]],
             tab_index: 0,
             cursor: Cursor::default(),
-            insert: true,
+            cursor_write_mode: write_mode,
+            force_redraw: false,
         })
     }
 
@@ -83,7 +89,37 @@ impl App {
         self.draw_tabs()?;
         for c in 0..COLUMN_COUNT {
             let (number, cursor) = self.tabs[self.tab_index][c].get();
-            Self::draw_column(&mut self.backend, number, cursor.col)?;
+
+            if c == self.cursor.col.into() {
+                let tmp = if self.cursor.row == Row::Signed {
+                    // Avoid stupid edge case with signed numbers
+                    // (Otherwise it would always render this as negative number, filling up
+                    //  the other rows)
+                    let mut copy = self.cursor;
+                    copy.row = Row::Decimal;
+                    format::replace_characters_automatic(0, copy, b"1")
+                } else {
+                    format::replace_characters_automatic(0, self.cursor, b"1")
+                };
+                Self::draw_column(&mut self.backend, tmp, cursor.col, true)?;
+            }
+            Self::draw_column(&mut self.backend, number, cursor.col, false)?;
+        }
+
+        // Float and double is a big edge case -> only here to visualize, not to edit
+        //  Not added to row enum to avoid a even bigger mess
+        for c in 0..COLUMN_COUNT {
+            let col = NUMBER_START_X + c as u8 * (NUMBER_DIGIT_WIDTH + 3);
+            let (number, _) = self.tabs[self.tab_index][c].get();
+
+            // Double
+            self.write_double(col, NUMBER_START_Y + LAST_ROW as u8 - 1, number)?;
+            // Float
+            // If the float is truncated we highlight the text in yellow
+            self.write_float(col, NUMBER_START_Y + LAST_ROW as u8, number)?;
+            // Second float is the second half of the 32 bits
+            let second_half = number.unbounded_shr(32);
+            self.write_float(col, NUMBER_START_Y + LAST_ROW as u8 + 1, second_half)?;
         }
 
         // color differences
@@ -94,8 +130,8 @@ impl App {
         }
         let col_left = NUMBER_START_X;
         let col_right = NUMBER_START_X + NUMBER_DIGIT_WIDTH + 3;
-        for row in 0u16..Row::LowerPadding as u16 {
-            for x in 0u16..NUMBER_DIGIT_WIDTH as u16 {
+        for row in 0u16..=(Row::LowerPadding as u16) {
+            for x in 0u16..u16::from(NUMBER_DIGIT_WIDTH) {
                 let y = row + u16::from(NUMBER_START_Y);
                 self.backend.set_background_color_if_different(
                     u16::from(col_left) + x,
@@ -107,6 +143,39 @@ impl App {
             }
         }
 
+        self.force_redraw = false;
+        Ok(())
+    }
+
+    fn write_double(&mut self, col: u8, row: u8, number: u64) -> Result<(), anyhow::Error> {
+        let mut text = [b' '; REAL_NUMBER_STRING_WIDTH];
+        let double = f64::from_ne_bytes(number.to_ne_bytes());
+        if write!(text.as_mut_slice(), "{double:>REAL_NUMBER_STRING_WIDTH$}").is_err() {
+            // Fallback to scientific if normal string formating does not fit
+            // If https://stackoverflow.com/a/1701085 is correct, then we need at max 24 chars for this
+            write!(text.as_mut_slice(), "{double:>REAL_NUMBER_STRING_WIDTH$.e}")
+                .context("Stackoverflow was wrong and the scientific representation of a double needs more than 26 chars")?;
+        }
+        self.backend.cursor_set(u16::from(col), u16::from(row));
+        self.backend.print(str::from_utf8(&text)?)?;
+        Ok(())
+    }
+
+    fn write_float(&mut self, col: u8, row: u8, number: u64) -> Result<(), anyhow::Error> {
+        let mut text = [b' '; REAL_NUMBER_STRING_WIDTH];
+        let float = f32::from_ne_bytes((number as u32).to_ne_bytes());
+        let is_float_truncated = number > u64::from(u32::MAX);
+        if write!(text.as_mut_slice(), "{float:>REAL_NUMBER_STRING_WIDTH$}").is_err() {
+            // Fallback to scientific if normal string formating does not fit
+            write!(text.as_mut_slice(), "{float:>REAL_NUMBER_STRING_WIDTH$.e}")?;
+        }
+        self.backend.cursor_set(u16::from(col), u16::from(row));
+        if is_float_truncated {
+            self.backend
+                .print_with_color(str::from_utf8(&text)?, style::Color::Yellow)?;
+        } else {
+            self.backend.print(str::from_utf8(&text)?)?;
+        }
         Ok(())
     }
 
@@ -126,7 +195,9 @@ impl App {
                 self.tabs[self.tab_index][1].get().0,
             );
             // Avoid uneccessary redraws when the screen does not change
-            let redraw = self.tab_index != last_tab_index || last_numbers != current_numbers;
+            let redraw = self.tab_index != last_tab_index
+                || last_numbers != current_numbers
+                || self.force_redraw;
             if redraw {
                 self.redraw()?;
             }
@@ -134,7 +205,7 @@ impl App {
             last_tab_index = self.tab_index;
             last_numbers = current_numbers;
 
-            self.cursor.set_terminal_cursor(&mut self.backend)?;
+            self.cursor.set_terminal_cursor(&mut self.backend);
             self.backend.flush(redraw)?;
             match read()? {
                 Event::Key(event) => {
@@ -147,15 +218,47 @@ impl App {
                         }
                         KeyCode::Delete => {
                             let (num, _) = self.get_current_column();
-                            let num = remove_character_automatic(num, self.cursor);
-                            self.set_number(num);
+                            let cursor_before = self.cursor;
                             self.cursor.move_right();
+                            // We are already at the right edge -> delete does nothing
+                            if cursor_before != self.cursor {
+                                let num = remove_character_automatic(num, self.cursor);
+                                // Have cursor at the correct position for undo
+                                self.cursor = cursor_before;
+                                self.set_number(num);
+                                self.cursor.move_right();
+                            }
                         }
                         KeyCode::Enter => {}
-                        KeyCode::Left => self.cursor.move_left(),
-                        KeyCode::Right => self.cursor.move_right(),
-                        KeyCode::Up => self.cursor.move_up(),
-                        KeyCode::Down => self.cursor.move_down(),
+                        KeyCode::Left => {
+                            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                                let (num, _) = self.get_current_column();
+                                let text = format_automatic(num, self.cursor.row)?;
+                                let trimmed = text.trim_ascii_start();
+                                self.cursor.text_pos = NUMBER_DIGIT_WIDTH - trimmed.len() as u8;
+                                self.cursor.fix_left();
+                            } else {
+                                self.cursor.move_left();
+                            }
+                            self.force_redraw = true;
+                        }
+                        KeyCode::Right => {
+                            self.cursor.move_right();
+                            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                                self.cursor.text_pos = NUMBER_DIGIT_WIDTH;
+                                self.cursor.fix_right();
+                            }
+                            self.force_redraw = true;
+                        }
+                        KeyCode::Up => {
+                            self.cursor.move_up();
+                            self.force_redraw = true;
+                        }
+                        KeyCode::Down => {
+                            self.cursor.move_down();
+                            self.force_redraw = true;
+                        }
+                        // TODO I think end and home should be the same as CTR <- and CTR ->
                         KeyCode::Home | KeyCode::End | KeyCode::Tab | KeyCode::BackTab => {
                             self.cursor.swap_column();
                         }
@@ -241,7 +344,11 @@ impl App {
                         KeyCode::Char('+') => self.set_positive(),
                         // toggle between insert and replace mode
                         KeyCode::Char('i') => {
-                            self.insert = !self.insert;
+                            self.cursor_write_mode = match self.cursor_write_mode {
+                                CursorWriteMode::Insert => CursorWriteMode::Replace,
+                                CursorWriteMode::Replace => CursorWriteMode::Insert,
+                            };
+                            self.backend.set_cursor_write_mode(self.cursor_write_mode);
                         }
                         KeyCode::Char(' ') => {
                             self.handle_char_input('0');
@@ -279,6 +386,7 @@ impl App {
                         self.cursor.col = 1;
                     }
                     self.cursor.fix_right();
+                    self.force_redraw = true;
                 }
 
                 Event::Paste(data) => {
@@ -297,19 +405,22 @@ impl App {
     }
 
     fn handle_char_input(&mut self, char: char) {
-        let (num, cursor) = self.get_current_column();
-        let row = cursor.row;
+        let (num, _) = self.get_current_column();
+
         // skip input that is currently not valid
-        if !is_valid_character_automatic(char as u8, row) {
+        if !is_valid_character_automatic(char as u8, self.cursor.row) {
             return;
         }
 
-        if self.insert {
-            let num = insert_characters_automatic(num, self.cursor, &[char as u8]);
-            self.set_number(num);
-        } else {
-            let num = replace_characters_automatic(num, self.cursor, &[char as u8]);
-            self.set_number(num);
+        match self.cursor_write_mode {
+            CursorWriteMode::Insert => {
+                let num = insert_characters_automatic(num, self.cursor, &[char as u8]);
+                self.set_number(num);
+            }
+            CursorWriteMode::Replace => {
+                let num = replace_characters_automatic(num, self.cursor, &[char as u8]);
+                self.set_number(num);
+            }
         }
     }
 
@@ -344,32 +455,50 @@ impl App {
         b: &mut Backend,
         text: [u8; NUMBER_STRING_WIDTH],
         col: u8,
-        row: Row,
+        row: u8,
+        write_background: bool,
     ) -> Result<()> {
-        // avoid writing leading spaces so we can keep the background
-        let trim = text.trim_ascii_start();
-        b.cursor_set(
-            u16::from(col) + u16::from(NUMBER_DIGIT_WIDTH) - trim.len() as u16,
-            row as u16,
-        );
-        b.print(str::from_utf8(trim)?)?;
+        if write_background {
+            let mut background = [b' '; NUMBER_STRING_WIDTH];
+            for (input, back) in text.iter().zip(background.iter_mut()) {
+                if *input != b' ' && *input != b',' {
+                    *back = b'0';
+                } else {
+                    *back = *input;
+                }
+            }
+            // avoid writing leading spaces so we can keep the background
+            let trim = background.trim_ascii_start();
+            b.cursor_set(
+                u16::from(col) + u16::from(NUMBER_DIGIT_WIDTH) - trim.len() as u16,
+                u16::from(row),
+            );
+            b.print_with_color(str::from_utf8(trim)?, COLOR_UNUSED_DIGIT)?;
+        } else {
+            // avoid writing leading spaces so we can keep the background
+            let trim = text.trim_ascii_start();
+            b.cursor_set(
+                u16::from(col) + u16::from(NUMBER_DIGIT_WIDTH) - trim.len() as u16,
+                u16::from(row),
+            );
+            b.print(str::from_utf8(trim)?)?;
+        }
 
         Ok(())
     }
 
-    fn draw_column(b: &mut Backend, number: UNumber, column_index: u8) -> Result<()> {
+    fn draw_column(
+        b: &mut Backend,
+        number: UNumber,
+        column_index: u8,
+        write_background: bool,
+    ) -> Result<()> {
         let col = NUMBER_START_X + column_index * (NUMBER_DIGIT_WIDTH + 3);
 
         for i in 1u8..8u8 {
             let row = Row::try_from(i).unwrap();
             let text = format_automatic(number, row);
-            // Signed is allowed to fail
-            if row == Row::Signed
-                && let Ok(text) = text
-            {
-                Self::write_trimmed(b, text, col, row + 1)?;
-            }
-            Self::write_trimmed(b, text?, col, row + 1)?;
+            Self::write_trimmed(b, text?, col, row as u8 + 1, write_background)?;
         }
         Ok(())
     }
@@ -413,34 +542,41 @@ impl App {
         b.print("SIGNED|                            |                            |")?;
         b.cursor_move_to_next_line(1);
         b.print("HEX   | ")?;
-        b.print_with_color("   xx xx xx xx xx xx xx xx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("   __ __ __ __ __ __ __ __", COLOR_UNUSED_DIGIT)?;
         b.print(" | ")?;
-        b.print_with_color("   xx xx xx xx xx xx xx xx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("   __ __ __ __ __ __ __ __", COLOR_UNUSED_DIGIT)?;
         b.print(" |")?;
         b.cursor_move_to_next_line(1);
         b.print("BIN 48| ")?;
-        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" | ")?;
-        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" |")?;
         b.cursor_move_to_next_line(1);
         b.print("BIN 32| ")?;
-        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" | ")?;
-        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" |")?;
         b.cursor_move_to_next_line(1);
         b.print("BIN 16| ")?;
-        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" | ")?;
-        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" |")?;
         b.cursor_move_to_next_line(1);
         b.print("BIN 00| ")?;
-        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" | ")?;
-        b.print_with_color("       xxxx xxxx xxxx xxxx", COLOR_UNUSED_DIGIT)?;
+        b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("F64   |                            |                            |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("F32_H |                            |                            |")?;
+        b.cursor_move_to_next_line(1);
+        b.print("F32_L |                            |                            |")?;
+        b.cursor_move_to_next_line(1);
         Ok(())
     }
 }

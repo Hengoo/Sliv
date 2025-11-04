@@ -1,5 +1,5 @@
 use crate::{
-    INumber, UNumber,
+    INumber, NUMBER_DIGIT_WIDTH, UNumber,
     column::{self, Cursor, Row},
 };
 use anyhow::{Context, Result, anyhow};
@@ -16,6 +16,7 @@ use std::{io::Write, ops::Shl};
 
 // technically we only need 26 but making it larger significantly simplifies suff
 pub const NUMBER_STRING_WIDTH: usize = 32;
+pub const REAL_NUMBER_STRING_WIDTH: usize = NUMBER_DIGIT_WIDTH as usize;
 
 #[allow(dead_code)]
 pub const fn char_to_number(char: char) -> UNumber {
@@ -292,7 +293,7 @@ pub fn replace_characters_automatic(number: UNumber, cursor: Cursor, chars: &[u8
 }
 
 fn replace_chars_decimal(number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
-    // working with u128 to avoid absurd complexity doing this correctly
+    // working with u128 to avoid unnecessary complexity doing this correctly
     let number: u128 = number.into();
     let mut middle: u128 = 0;
     let mut count = 0;
@@ -327,7 +328,7 @@ fn replace_chars_decimal(number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumb
 }
 
 fn replace_chars_signed_decimal(number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
-    // working with i128 to avoid absurd complexity doing this correctly
+    // working with i128 to avoid unnecessary complexity doing this correctly
     let number: i128 = make_negative(number).into();
     let mut middle: i128 = 0;
     let mut count = 0;
@@ -369,7 +370,11 @@ fn replace_chars_hex(mut number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumb
         match char {
             b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9' | b'A' | b'B'
             | b'C' | b'D' | b'E' | b'F' | b'a' | b'b' | b'c' | b'd' | b'e' | b'f' => {
-                input_number <<= 4;
+                if let Some(num) = input_number.checked_shl(4) {
+                    input_number = num;
+                } else {
+                    return UNumber::MAX;
+                }
                 input_number |= u8_char_to_number(*char);
                 bit_count += 4;
             }
@@ -378,10 +383,14 @@ fn replace_chars_hex(mut number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumb
     }
 
     let bit_pos = column::LOOKUP_TABLE[cursor.row as usize][cursor.text_pos as usize] * 4;
-    let truncated_bit_count = UNumber::BITS - (input_number.leading_zeros() & !4);
+    let truncated_bit_count = UNumber::BITS - (input_number.leading_zeros() & !3);
     if truncated_bit_count + u32::from(bit_pos) > UNumber::BITS {
         return UNumber::MAX;
     }
+    // let truncated_bit_count = UNumber::BITS - (input_number.leading_zeros() & !4);
+    // if truncated_bit_count + u32::from(bit_pos) > UNumber::BITS {
+    //     return UNumber::MAX;
+    // }
 
     let mut mask = !(UNumber::MAX << bit_count);
     mask <<= bit_pos;
@@ -774,6 +783,15 @@ mod tests {
         assert_eq!(
             replace_characters_automatic(num, cursor, b"1ba"),
             UNumber::MAX
+        );
+        cursor.text_pos = 4;
+        assert_eq!(
+            replace_characters_automatic(num, cursor, b"3"),
+            0x3000_0000_00ab_cdef
+        );
+        assert_eq!(
+            replace_characters_automatic(num, cursor, b"F"),
+            0xf000_0000_00ab_cdef
         );
 
         // Bin

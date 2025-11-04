@@ -142,9 +142,23 @@ impl Backend {
         Ok(())
     }
 
-    pub fn set_background_color(&mut self, x: u16, y: u16, color: style::Color) -> Result<()> {
-        let pos = Pos { x, y };
-        self.buffer.pixels[pos.get_flat_index(self.size)?].background_color = color;
+    // Compares two cells and sets the background color if they don't show the same character
+    pub fn set_background_color_if_different(
+        &mut self,
+        x0: u16,
+        y0: u16,
+        x1: u16,
+        y1: u16,
+        color: style::Color,
+    ) -> Result<()> {
+        let pos0 = Pos { x: x0, y: y0 };
+        let pos1 = Pos { x: x1, y: y1 };
+        if self.buffer.pixels[pos0.get_flat_index(self.size)?].value
+            != self.buffer.pixels[pos1.get_flat_index(self.size)?].value
+        {
+            self.buffer.pixels[pos0.get_flat_index(self.size)?].background_color = color;
+            self.buffer.pixels[pos1.get_flat_index(self.size)?].background_color = color;
+        }
         Ok(())
     }
 

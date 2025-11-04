@@ -85,6 +85,28 @@ impl App {
             let (number, cursor) = self.tabs[self.tab_index][c].get();
             Self::draw_column(&mut self.backend, number, cursor.col)?;
         }
+
+        // color differences
+        let (number_left, _) = self.tabs[self.tab_index][0].get();
+        let (number_right, _) = self.tabs[self.tab_index][1].get();
+        if number_left == number_right || number_left == 0 || number_right == 0 {
+            return Ok(());
+        }
+        let col_left = NUMBER_START_X;
+        let col_right = NUMBER_START_X + NUMBER_DIGIT_WIDTH + 3;
+        for row in 0u16..Row::LowerPadding as u16 {
+            for x in 0u16..NUMBER_DIGIT_WIDTH as u16 {
+                let y = row + u16::from(NUMBER_START_Y);
+                self.backend.set_background_color_if_different(
+                    u16::from(col_left) + x,
+                    y,
+                    u16::from(col_right) + x,
+                    y,
+                    style::Color::DarkBlue,
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -336,7 +358,7 @@ impl App {
     }
 
     fn draw_column(b: &mut Backend, number: UNumber, column_index: u8) -> Result<()> {
-        let col = NUMBER_START_X + column_index * { NUMBER_DIGIT_WIDTH + 3 };
+        let col = NUMBER_START_X + column_index * (NUMBER_DIGIT_WIDTH + 3);
 
         for i in 1u8..8u8 {
             let row = Row::try_from(i).unwrap();

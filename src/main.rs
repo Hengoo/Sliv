@@ -55,7 +55,6 @@ struct App {
     tab_index: usize,
     cursor: Cursor,
     cursor_write_mode: CursorWriteMode,
-    force_redraw: bool,
 }
 
 impl App {
@@ -70,7 +69,6 @@ impl App {
             tab_index: 0,
             cursor: Cursor::default(),
             cursor_write_mode: write_mode,
-            force_redraw: false,
         })
     }
 
@@ -143,7 +141,6 @@ impl App {
             }
         }
 
-        self.force_redraw = false;
         Ok(())
     }
 
@@ -189,6 +186,7 @@ impl App {
             self.tabs[self.tab_index][0].get().0,
             self.tabs[self.tab_index][1].get().0,
         );
+        let mut last_cursor = self.cursor;
         'update_loop: loop {
             let current_numbers = (
                 self.tabs[self.tab_index][0].get().0,
@@ -197,13 +195,14 @@ impl App {
             // Avoid uneccessary redraws when the screen does not change
             let redraw = self.tab_index != last_tab_index
                 || last_numbers != current_numbers
-                || self.force_redraw;
+                || last_cursor != self.cursor;
             if redraw {
                 self.redraw()?;
             }
 
             last_tab_index = self.tab_index;
             last_numbers = current_numbers;
+            last_cursor = self.cursor;
 
             self.cursor.set_terminal_cursor(&mut self.backend);
             self.backend.flush(redraw)?;
@@ -232,34 +231,31 @@ impl App {
                         KeyCode::Enter => {}
                         KeyCode::Left => {
                             if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                let (num, _) = self.get_current_column();
-                                let text = format_automatic(num, self.cursor.row)?;
-                                let trimmed = text.trim_ascii_start();
-                                self.cursor.text_pos = NUMBER_DIGIT_WIDTH - trimmed.len() as u8;
-                                self.cursor.fix_left();
+                                self.move_cursor_home()?;
                             } else {
                                 self.cursor.move_left();
                             }
-                            self.force_redraw = true;
                         }
                         KeyCode::Right => {
-                            self.cursor.move_right();
                             if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                self.cursor.text_pos = NUMBER_DIGIT_WIDTH;
-                                self.cursor.fix_right();
+                                self.move_cursor_end();
+                            } else {
+                                self.cursor.move_right();
                             }
-                            self.force_redraw = true;
                         }
                         KeyCode::Up => {
                             self.cursor.move_up();
-                            self.force_redraw = true;
                         }
                         KeyCode::Down => {
                             self.cursor.move_down();
-                            self.force_redraw = true;
                         }
-                        // TODO I think end and home should be the same as CTR <- and CTR ->
-                        KeyCode::Home | KeyCode::End | KeyCode::Tab | KeyCode::BackTab => {
+                        KeyCode::End => {
+                            self.move_cursor_end();
+                        }
+                        KeyCode::Home => {
+                            self.move_cursor_home()?;
+                        }
+                        KeyCode::Tab | KeyCode::BackTab => {
                             self.cursor.swap_column();
                         }
                         // go tab to right
@@ -386,7 +382,6 @@ impl App {
                         self.cursor.col = 1;
                     }
                     self.cursor.fix_right();
-                    self.force_redraw = true;
                 }
 
                 Event::Paste(data) => {
@@ -402,6 +397,23 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    // Move to leftmost position, but not further than the number itself
+    fn move_cursor_home(&mut self) -> Result<(), anyhow::Error> {
+        let (num, _) = self.get_current_column();
+        let text = format_automatic(num, self.cursor.row)?;
+        let trimmed = text.trim_ascii_start();
+        self.cursor.text_pos = NUMBER_DIGIT_WIDTH - trimmed.len() as u8;
+        self.cursor.fix_left();
+        Ok(())
+    }
+
+    // Move to rightmost position
+    fn move_cursor_end(&mut self) {
+        self.cursor.move_right();
+        self.cursor.text_pos = NUMBER_DIGIT_WIDTH;
+        self.cursor.fix_right();
     }
 
     fn handle_char_input(&mut self, char: char) {

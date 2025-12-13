@@ -13,4 +13,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1.0.100"
+# We don't need fancy image features from clipboard
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control", "windows-sys"]}
 crossterm = { version = "0.29.0", features = ["osc52"] }

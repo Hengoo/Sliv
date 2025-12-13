@@ -10,6 +10,7 @@ use std::ops::{Shl, Shr};
 use std::result::Result::Ok;
 
 use anyhow::{Context, Result};
+use arboard::Clipboard;
 use crossterm::{
     event::{Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, read},
     style::{self},
@@ -262,12 +263,12 @@ impl App {
                         // ctrl -> new tab
                         // alt -> remove tab
                         KeyCode::Char('t') => {
-                            if event.modifiers.intersects(KeyModifiers::CONTROL) {
+                            if event.modifiers.contains(KeyModifiers::CONTROL) {
                                 let left = Column::new(0);
                                 let right = Column::new(1);
                                 self.tabs.push([left, right]);
                                 self.tab_index = self.tabs.len() - 1;
-                            } else if event.modifiers.intersects(KeyModifiers::ALT) {
+                            } else if event.modifiers.contains(KeyModifiers::ALT) {
                                 self.tabs.remove(self.tab_index);
                                 if self.tabs.is_empty() {
                                     let left = Column::new(0);
@@ -286,9 +287,8 @@ impl App {
                             self.tab_index = self.tab_index.min(self.tabs.len() - 1);
                         }
 
-                        KeyCode::Insert => {}
                         // quit
-                        KeyCode::Char('q') => break 'update_loop,
+                        KeyCode::Char('q' | 'Q') => break 'update_loop,
                         // undo
                         KeyCode::Char('u') => {
                             (_, self.cursor) = self.get_current_column();
@@ -301,21 +301,36 @@ impl App {
                         }
                         // yank
                         KeyCode::Char('y') => {
-                            // TODO copy to clipboard
-                            // let (num, _) = self.get_current_column();
-                            // seems this does not work with gnome terminal...
-                            // TODO right now we just copy the "number" but i think it should copy the correct formatting of the line as well
-                            // self.backend.w
-                            //     .execute(CopyToClipboard::to_primary_from(num.to_string()))?;
+                            self.copy_to_clipboard(false)?;
+                        }
+                        // yank without formatting
+                        KeyCode::Char('Y') => {
+                            self.copy_to_clipboard(true)?;
+                        }
+                        // Ctrl C is copy so it can be done with left hand if needed (exit is q)
+                        KeyCode::Char('c') => {
+                            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                                self.copy_to_clipboard(false)?;
+                            } else {
+                                self.handle_char_input('c');
+                            }
+                        }
+                        KeyCode::Insert => {
+                            self.paste_from_clipboard(false);
                         }
                         // paste
                         KeyCode::Char('p') => {
-                            // TODO paste from clipboard
+                            self.paste_from_clipboard(false);
+                        }
+                        // Ctrl V is paste, because why not
+                        KeyCode::Char('v') => {
+                            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                                self.paste_from_clipboard(false);
+                            }
                         }
                         // paste at position
                         KeyCode::Char('P') => {
-                            // TODO paste from clipboard
-                            // paste the numbers at position (guess char by char. Make sure history is not polluted)
+                            self.paste_from_clipboard(true);
                         }
                         KeyCode::Char('<' | 'l') => {
                             let (num, _) = self.get_current_column();
@@ -395,6 +410,61 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    fn paste_from_clipboard(&mut self, _paste_at_cursor: bool) {
+        if let Ok(mut clipboard) = Clipboard::new()
+            && let Ok(text) = clipboard.get_text()
+            && let Some(number) = parse_user_input(&text, self.cursor.row)
+        {
+            // TODO This currently always overwrites the entire number, but with paste at cursor
+            //  it should use cursor textposition instead and insert / replace accordingly
+            self.set_number(number);
+        }
+    }
+
+    fn copy_to_clipboard(&self, keep_format: bool) -> Result<(), anyhow::Error> {
+        // TODO: Optimally I would use the below terminal feature if available, but now idea how to determine that...
+        // self.backend.w
+        //     .execute(CopyToClipboard::to_primary_from(num.to_string()))?;
+        if let Ok(mut clipboard) = Clipboard::new() {
+            let (num, _) = self.get_current_column();
+            let mut text: Vec<_> = match self.cursor.row {
+                Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => {
+                    let mut res = Vec::with_capacity(usize::from(NUMBER_DIGIT_WIDTH) * 4);
+                    res.extend_from_slice(b"0b");
+                    res.extend_from_slice(format_automatic(num, Row::Bin0)?.trim_ascii_start());
+                    if res.len() != 2 {
+                        res.push(b' ');
+                    }
+                    res.extend_from_slice(format_automatic(num, Row::Bin1)?.trim_ascii_start());
+                    if res.len() != 2 {
+                        res.push(b' ');
+                    }
+                    res.extend_from_slice(format_automatic(num, Row::Bin2)?.trim_ascii_start());
+                    if res.len() != 2 {
+                        res.push(b' ');
+                    }
+                    res.extend_from_slice(format_automatic(num, Row::Bin3)?.trim_ascii_start());
+                    res
+                }
+                Row::Hex => {
+                    let mut res = Vec::with_capacity(usize::from(NUMBER_DIGIT_WIDTH));
+                    res.extend_from_slice(b"0x");
+                    res.extend_from_slice(format_automatic(num, Row::Hex)?.trim_ascii_start());
+                    res
+                }
+                _ => format_automatic(num, self.cursor.row)?
+                    .into_iter()
+                    .collect(),
+            };
+            if !keep_format {
+                // remove ',' and ' '
+                text.retain(|x| x.is_ascii_alphanumeric() || *x == b'-');
+            }
+            _ = clipboard.set_text(str::from_utf8(text.as_slice())?);
         }
         Ok(())
     }

@@ -141,6 +141,12 @@ impl Backend {
         self.print_with_color(text, style::Color::Reset)
     }
 
+    pub fn println(&mut self, text: &str) -> Result<()> {
+        self.print_with_color(text, style::Color::Reset)?;
+        self.cursor_move_to_next_line(1);
+        Ok(())
+    }
+
     // Writes text to backend buffers and advances the cursor accordingly
     // Does not handle newline
     // Does not wrap arround when going past the width

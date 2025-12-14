@@ -11,6 +11,7 @@ use std::result::Result::Ok;
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;
+use crossterm::event::MouseButton;
 use crossterm::{
     event::{Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, read},
     style::{self},
@@ -56,6 +57,7 @@ struct App {
     tab_index: usize,
     cursor: Cursor,
     cursor_write_mode: CursorWriteMode,
+    write_help: bool,
 }
 
 impl App {
@@ -70,6 +72,7 @@ impl App {
             tab_index: 0,
             cursor: Cursor::default(),
             cursor_write_mode: write_mode,
+            write_help: false,
         })
     }
 
@@ -84,7 +87,7 @@ impl App {
     }
 
     fn redraw(&mut self) -> Result<()> {
-        Self::draw_background(&mut self.backend)?;
+        Self::draw_background(&mut self.backend, self.write_help)?;
         self.draw_tabs()?;
         for c in 0..COLUMN_COUNT {
             let (number, cursor) = self.tabs[self.tab_index][c].get();
@@ -206,6 +209,7 @@ impl App {
             self.tabs[self.tab_index][1].get().0,
         );
         let mut last_cursor = self.cursor;
+        let mut last_help = self.write_help;
         'update_loop: loop {
             let current_numbers = (
                 self.tabs[self.tab_index][0].get().0,
@@ -214,7 +218,8 @@ impl App {
             // Avoid uneccessary redraws when the screen does not change
             let redraw = self.tab_index != last_tab_index
                 || last_numbers != current_numbers
-                || last_cursor != self.cursor;
+                || last_cursor != self.cursor
+                || last_help != self.write_help;
             if redraw {
                 self.redraw()?;
             }
@@ -222,6 +227,7 @@ impl App {
             last_tab_index = self.tab_index;
             last_numbers = current_numbers;
             last_cursor = self.cursor;
+            last_help = self.write_help;
 
             self.cursor.set_terminal_cursor(&mut self.backend);
             self.backend.flush(redraw)?;
@@ -262,18 +268,10 @@ impl App {
                                 self.cursor.move_right();
                             }
                         }
-                        KeyCode::Up => {
-                            self.cursor.move_up();
-                        }
-                        KeyCode::Down => {
-                            self.cursor.move_down();
-                        }
-                        KeyCode::End => {
-                            self.move_cursor_end();
-                        }
-                        KeyCode::Home => {
-                            self.move_cursor_home()?;
-                        }
+                        KeyCode::Up => self.cursor.move_up(),
+                        KeyCode::Down => self.cursor.move_down(),
+                        KeyCode::End => self.move_cursor_end(),
+                        KeyCode::Home => self.move_cursor_home()?,
                         KeyCode::Tab | KeyCode::BackTab => {
                             self.cursor.swap_column();
                         }
@@ -318,13 +316,9 @@ impl App {
                             (_, self.cursor) = self.get_current_column();
                         }
                         // yank
-                        KeyCode::Char('y') => {
-                            self.copy_to_clipboard(false)?;
-                        }
+                        KeyCode::Char('y') => self.copy_to_clipboard(false)?,
                         // yank without formatting
-                        KeyCode::Char('Y') => {
-                            self.copy_to_clipboard(true)?;
-                        }
+                        KeyCode::Char('Y') => self.copy_to_clipboard(true)?,
                         // Ctrl C is copy so it can be done with left hand if needed (exit is q)
                         KeyCode::Char('c') => {
                             if event.modifiers.contains(KeyModifiers::CONTROL) {
@@ -333,13 +327,9 @@ impl App {
                                 self.handle_char_input('c');
                             }
                         }
-                        KeyCode::Insert => {
-                            self.paste_from_clipboard(false);
-                        }
+                        KeyCode::Insert => self.paste_from_clipboard(false),
                         // paste
-                        KeyCode::Char('p') => {
-                            self.paste_from_clipboard(false);
-                        }
+                        KeyCode::Char('p') => self.paste_from_clipboard(false),
                         // Ctrl V is paste, because why not
                         KeyCode::Char('v') => {
                             if event.modifiers.contains(KeyModifiers::CONTROL) {
@@ -347,9 +337,7 @@ impl App {
                             }
                         }
                         // paste at position
-                        KeyCode::Char('P') => {
-                            self.paste_from_clipboard(true);
-                        }
+                        KeyCode::Char('P') => self.paste_from_clipboard(true),
                         KeyCode::Char('<' | 'l') => {
                             let (num, _) = self.get_current_column();
                             self.set_number(num.shl(1));
@@ -379,44 +367,42 @@ impl App {
                             };
                             self.backend.set_cursor_write_mode(self.cursor_write_mode);
                         }
-                        KeyCode::Char(' ') => {
-                            self.handle_char_input('0');
+                        KeyCode::Char('h' | 'H') => {
+                            self.write_help = !self.write_help;
                         }
-                        KeyCode::Char(char) => {
-                            self.handle_char_input(char);
-                        }
+                        KeyCode::Char(' ') => self.handle_char_input('0'),
+                        KeyCode::Char(char) => self.handle_char_input(char),
                         KeyCode::Esc => {}
                         _ => {}
                     }
                 }
                 Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::Down(_),
+                    kind: MouseEventKind::Down(MouseButton::Left),
                     column,
                     row,
                     modifiers: _,
                 }) => {
-                    self.cursor.row = Row::try_from(
-                        row.clamp(NUMBER_START_Y.into(), u16::from(NUMBER_START_Y) + 7) as u8
-                            - NUMBER_START_Y
-                            + 1,
-                    )
-                    .unwrap();
-                    let tmp = column.clamp(
-                        NUMBER_START_X.into(),
-                        u16::from(NUMBER_START_X) + u16::from(NUMBER_DIGIT_WIDTH) * 2 + 2,
-                    ) as u8
-                        - NUMBER_START_X
-                        + 1;
-                    if tmp <= NUMBER_DIGIT_WIDTH + 2 {
-                        self.cursor.text_pos = tmp.clamp(1, 26);
-                        self.cursor.col = 0;
-                    } else {
-                        self.cursor.text_pos = (tmp - NUMBER_DIGIT_WIDTH - 3).clamp(1, 26);
-                        self.cursor.col = 1;
-                    }
-                    self.cursor.fix_right();
+                    self.set_cursor_from_mouse(column, row);
+                }
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Right),
+                    column,
+                    row,
+                    modifiers: _,
+                }) => {
+                    self.set_cursor_from_mouse(column, row);
+                    self.copy_to_clipboard(false)?;
                 }
 
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Middle),
+                    column,
+                    row,
+                    modifiers: _,
+                }) => {
+                    self.set_cursor_from_mouse(column, row);
+                    self.paste_from_clipboard(false);
+                }
                 Event::Paste(data) => {
                     // overwrites current number
                     let (_, cursor) = self.get_current_column();
@@ -430,6 +416,28 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn set_cursor_from_mouse(&mut self, column: u16, row: u16) {
+        self.cursor.row = Row::try_from(
+            row.clamp(NUMBER_START_Y.into(), u16::from(NUMBER_START_Y) + 7) as u8 - NUMBER_START_Y
+                + 1,
+        )
+        .unwrap();
+        let tmp = column.clamp(
+            NUMBER_START_X.into(),
+            u16::from(NUMBER_START_X) + u16::from(NUMBER_DIGIT_WIDTH) * 2 + 2,
+        ) as u8
+            - NUMBER_START_X
+            + 1;
+        if tmp <= NUMBER_DIGIT_WIDTH + 2 {
+            self.cursor.text_pos = tmp.clamp(1, 26);
+            self.cursor.col = 0;
+        } else {
+            self.cursor.text_pos = (tmp - NUMBER_DIGIT_WIDTH - 3).clamp(1, 26);
+            self.cursor.col = 1;
+        }
+        self.cursor.fix_right();
     }
 
     fn paste_from_clipboard(&mut self, _paste_at_cursor: bool) {
@@ -632,15 +640,12 @@ impl App {
         Ok(())
     }
 
-    fn draw_background(b: &mut Backend) -> Result<()> {
+    fn draw_background(b: &mut Backend, write_help: bool) -> Result<()> {
         // fist row is reserved for tabs
         b.cursor_set(0, u16::from(NUMBER_START_Y) - 1);
-        b.print("=================================================================")?;
-        b.cursor_move_to_next_line(1);
-        b.print("DEC   |                            |                            |")?;
-        b.cursor_move_to_next_line(1);
-        b.print("SIGNED|                            |                            |")?;
-        b.cursor_move_to_next_line(1);
+        b.println("=================================================================")?;
+        b.println("DEC   |                            |                            |")?;
+        b.println("SIGNED|                            |                            |")?;
         b.print("HEX   | ")?;
         b.print_with_color("   __ __ __ __ __ __ __ __", COLOR_UNUSED_DIGIT)?;
         b.print(" | ")?;
@@ -671,12 +676,66 @@ impl App {
         b.print_with_color("       ____ ____ ____ ____", COLOR_UNUSED_DIGIT)?;
         b.print(" |")?;
         b.cursor_move_to_next_line(1);
-        b.print("F64   |                            |                            |")?;
-        b.cursor_move_to_next_line(1);
-        b.print("F32_H |                            |                            |")?;
-        b.cursor_move_to_next_line(1);
-        b.print("F32_L |                            |                            |")?;
-        b.cursor_move_to_next_line(1);
+        b.println("F64   |                            |                            |")?;
+        b.println("F32_H |                            |                            |")?;
+        b.println("F32_L |                            |                            |")?;
+        b.println("=================================================================")?;
+
+        b.print_with_color("Toggle help with 'h'", style::Color::Grey)?;
+        b.cursor_move_to_next_line(2);
+        if write_help {
+            b.println("'q'           quit")?;
+            b.println("number (when in hex row also abcdef or ABCDEF) to write number.")?;
+            b.println("' '           is treated as '0'")?;
+            b.println("'Backspace'   remove character left of cursor")?;
+            b.println("'Delete'      remove characters")?;
+            b.println("'i'           toggle input mode between insert and replace")?;
+            b.println("'u'           undo")?;
+            b.println("'U'           redo")?;
+
+            b.cursor_move_to_next_line(1);
+            b.println("'>', 'r'      right shift binary")?;
+            b.println("'<', 'l'      left  shift binary")?;
+            b.println("'R'           right rotate binary")?;
+            b.println("'L'           left  rotate binary")?;
+
+            b.cursor_move_to_next_line(1);
+            b.println("'s'           toggle sign. Basically number *= -1")?;
+            b.println("'-'           set number positive")?;
+            b.println("'+'           set number negative")?;
+
+            b.cursor_move_to_next_line(1);
+            b.print_with_color(
+                "Clipboard (For non obvious format it will prioritize current cursor position):",
+                style::Color::Grey,
+            )?;
+            b.cursor_move_to_next_line(1);
+            b.println("'y', 'Ctr_c'  copy number to clipboard")?;
+            b.println("'mouse2'      copy number under mouse to clipboard")?;
+            b.println("'Y'           copy number with formatting to clipboard")?;
+            b.println("'p', 'Ctr_v'  paste number from clipboard")?;
+            b.println("'mouse3'      paste number from clipboard to mouse")?;
+
+            b.cursor_move_to_next_line(1);
+            b.print_with_color("Cursor movement:", style::Color::Grey)?;
+            b.cursor_move_to_next_line(1);
+            b.println("'Arrow keys'  cursor movement")?;
+            b.println("'mouse1'      cursor movement")?;
+            b.println("'Tab'         swap between the two colums")?;
+            b.println("'Home', 'Ctr_left'  jump to start of number")?;
+            b.println("'End', 'Ctr_right'  jump to end of number")?;
+
+            b.cursor_move_to_next_line(1);
+            b.print_with_color(
+                "Tabs (See top of the terminal for small preview):",
+                style::Color::Grey,
+            )?;
+            b.cursor_move_to_next_line(1);
+            b.println("'Ctr_t'       add new tab")?;
+            b.println("'Alt_t'       delete tab")?;
+            b.println("'t',          navigate to next tab")?;
+            b.println("'T'           navigate to previous tab")?;
+        }
         Ok(())
     }
 }

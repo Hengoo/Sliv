@@ -177,7 +177,25 @@ impl App {
         Ok(())
     }
 
-    fn run(&mut self) -> Result<()> {
+    fn run(&mut self, input_numbers: Vec<UNumber>) -> Result<()> {
+        if input_numbers.is_empty() {
+            // No cmd args provided, lets check if there is a number in the clipboard
+            self.paste_from_clipboard(false);
+        } else {
+            // read all input numbers
+            self.tabs.resize(
+                input_numbers.len().div_ceil(2),
+                [Column::new(0), Column::new(1)],
+            );
+            for (i, num) in input_numbers.into_iter().enumerate() {
+                self.tab_index = i / 2;
+                self.cursor.col = (i % 2) as u8;
+                self.set_number(num);
+            }
+            self.tab_index = 0;
+            self.cursor.col = 0;
+        }
+
         self.redraw()?;
         self.backend.flush(true)?;
 
@@ -665,9 +683,43 @@ impl App {
 
 fn main() {
     unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
-    // TODO have a look at signal handler to correctly handle ctrl-c
+
+    // Skip the first arg (the executable path)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if let Some(arg) = args.first()
+        && (arg == "-h" || arg == "-H" || arg == "-help" || arg == "--help")
+    {
+        println!("Sliv: Simple Lightweight Integer Visualisation\n");
+        println!("Usage: sliv [NUMBER...]");
+        println!("       sliv [OPTIONS]\n");
+        println!("Number:");
+        println!("Any numbers to initialize Sliv with. Can be signed, unsigned, hex, binary.");
+        println!("Float not supported");
+        println!(
+            "When no number is provided Sliv will check if there is a number in the clipboard\n"
+        );
+
+        println!("Options:");
+        println!("-v, -V, -version, --version         Print version info and exit");
+        println!("-h, -H, -help, --help               Print this screen and exit\n");
+
+        println!("While Sliv is running, press 'h' for a keybind overlay\n");
+        return;
+    }
+    if let Some(arg) = args.first()
+        && (arg == "-v" || arg == "-V" || arg == "-version" || arg == "--version")
+    {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    let arg_input: Vec<UNumber> = args
+        .into_iter()
+        .filter_map(|arg| parse_user_input(&arg, Row::Decimal))
+        .collect();
 
     let mut app = App::init().expect("Error during initialization");
-    let res = app.run();
+    let res = app.run(arg_input);
     res.expect("App failed somewhere in update loop");
 }

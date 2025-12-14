@@ -31,34 +31,52 @@ pub enum CursorWriteMode {
 #[derive(Debug)]
 pub struct Backend {
     writer: Writer,
-    size: Size,
     cursor: Pos,
     cursor_write_mode: CursorWriteMode,
 
+    terminal_size: Size,
+    // Size of the buffer
+    size: Size,
     buffer: Buffer,
     // Buffer from the previous frame
     buffer_last: Buffer,
     // write_cache is used during flush. Stored here to avoid repeated allocations
     write_cache: String,
+    force_full_redraw: bool,
 }
 
 impl Backend {
-    pub fn new(width: u16, height: u16, cursor_write_mode: CursorWriteMode) -> Result<Self> {
+    pub fn new(
+        buffer_width: u16,
+        buffer_height: u16,
+        terminal_width: u16,
+        terminal_height: u16,
+        cursor_write_mode: CursorWriteMode,
+    ) -> Result<Self> {
         terminal::enable_raw_mode()?;
         let mut writer = std::io::stdout();
         writer
             .execute(EnterAlternateScreen)?
             .execute(EnableBracketedPaste)?
             .execute(EnableMouseCapture)?;
-        let size = Size { width, height };
+        let size = Size {
+            width: buffer_width,
+            height: buffer_height,
+        };
+        let terminal_size = Size {
+            width: terminal_width,
+            height: terminal_height,
+        };
         Ok(Self {
             writer,
             size,
+            terminal_size,
             cursor: Pos { x: 0, y: 0 },
             cursor_write_mode,
             buffer: Buffer::new(size),
             buffer_last: Buffer::new(size),
             write_cache: String::with_capacity(size.width as usize),
+            force_full_redraw: false,
         })
     }
 
@@ -87,6 +105,21 @@ impl Backend {
             {
                 let x = (i % self.size.width as usize) as u16;
                 let y = (i / self.size.width as usize) as u16;
+
+                if x > self.terminal_size.width || y > self.terminal_size.height {
+                    if let Some(tmp) = first_pixel.as_ref() {
+                        self.writer.queue(style::PrintStyledContent(
+                            self.write_cache
+                                .as_str()
+                                .with(tmp.color)
+                                .on(tmp.background_color),
+                        ))?;
+                        self.write_cache.clear();
+                        first_pixel = None;
+                        first_pixel_y = None;
+                    }
+                    continue;
+                }
 
                 if first_pixel.is_some() {
                     let tmp = first_pixel.as_ref().unwrap();
@@ -118,13 +151,42 @@ impl Backend {
                     self.write_cache.push(p.value);
                 }
             }
+
             swap(&mut self.buffer, &mut self.buffer_last);
             self.clear();
+        } else if self.force_full_redraw {
+            self.writer
+                .execute(terminal::Clear(terminal::ClearType::All))?;
+            // (Write every pixel individually because I am to lazy)
+            self.write_cache.clear();
+            self.writer.queue(cursor::MoveTo(0, 0))?;
+            let mut last_y = 0;
+            for (i, p) in self.buffer_last.pixels.iter().enumerate() {
+                let x = (i % self.size.width as usize) as u16;
+                let y = (i / self.size.width as usize) as u16;
+                if x >= self.terminal_size.width || y >= self.terminal_size.height {
+                    continue;
+                }
+                self.write_cache.push(p.value);
+
+                if y != last_y {
+                    self.writer.queue(cursor::MoveTo(x, y))?;
+                }
+                self.writer.queue(style::PrintStyledContent(
+                    self.write_cache
+                        .as_str()
+                        .with(p.color)
+                        .on(p.background_color),
+                ))?;
+                self.write_cache.clear();
+                last_y = y;
+            }
         }
 
         self.cursor = cursor_backup;
         self.show_cursor_at(self.cursor.x, self.cursor.y)?;
         self.writer.flush()?;
+        self.force_full_redraw = false;
         Ok(())
     }
 
@@ -216,6 +278,14 @@ impl Backend {
         }
         self.writer.queue(cursor::Show)?;
         Ok(())
+    }
+
+    pub const fn update_terminal_size(&mut self, terminal_width: u16, terminal_height: u16) {
+        self.terminal_size = Size {
+            width: terminal_width,
+            height: terminal_height,
+        };
+        self.force_full_redraw = true;
     }
 }
 

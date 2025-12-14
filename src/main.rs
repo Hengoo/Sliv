@@ -58,6 +58,7 @@ struct App {
     cursor: Cursor,
     cursor_write_mode: CursorWriteMode,
     write_help: bool,
+    force_redraw: bool,
 }
 
 impl App {
@@ -66,13 +67,15 @@ impl App {
         let right = Column::new(1);
         let write_mode = CursorWriteMode::Insert;
 
+        let (width, height) = crossterm::terminal::size()?;
         Ok(Self {
-            backend: Backend::new(100, 100, write_mode)?,
+            backend: Backend::new(100, 100, width, height, write_mode)?,
             tabs: vec![[left, right]],
             tab_index: 0,
             cursor: Cursor::default(),
             cursor_write_mode: write_mode,
             write_help: false,
+            force_redraw: false,
         })
     }
 
@@ -117,11 +120,11 @@ impl App {
             // Double
             self.write_double(col, NUMBER_START_Y + LAST_ROW as u8 - 1, number)?;
             // Float
-            // If the float is truncated we highlight the text in yellow
-            self.write_float(col, NUMBER_START_Y + LAST_ROW as u8, number)?;
             // Second float is the second half of the 32 bits
             let second_half = number.unbounded_shr(32);
-            self.write_float(col, NUMBER_START_Y + LAST_ROW as u8 + 1, second_half)?;
+            self.write_float(col, NUMBER_START_Y + LAST_ROW as u8, second_half)?;
+            // If the float is truncated we highlight the text in yellow
+            self.write_float(col, NUMBER_START_Y + LAST_ROW as u8 + 1, number)?;
         }
 
         // color differences
@@ -145,6 +148,7 @@ impl App {
             }
         }
 
+        self.force_redraw = false;
         Ok(())
     }
 
@@ -180,12 +184,16 @@ impl App {
         Ok(())
     }
 
-    fn run(&mut self, input_numbers: Vec<UNumber>) -> Result<()> {
+    fn run(&mut self, mut input_numbers: Vec<UNumber>) -> Result<()> {
         if input_numbers.is_empty() {
             // No cmd args provided, lets check if there is a number in the clipboard
             self.paste_from_clipboard(false);
         } else {
             // read all input numbers
+            // (Only support max 12 numbers)
+            if input_numbers.len() > 12 {
+                input_numbers.resize(12, 0);
+            }
             self.tabs.resize(
                 input_numbers.len().div_ceil(2),
                 [Column::new(0), Column::new(1)],
@@ -209,7 +217,6 @@ impl App {
             self.tabs[self.tab_index][1].get().0,
         );
         let mut last_cursor = self.cursor;
-        let mut last_help = self.write_help;
         'update_loop: loop {
             let current_numbers = (
                 self.tabs[self.tab_index][0].get().0,
@@ -219,7 +226,7 @@ impl App {
             let redraw = self.tab_index != last_tab_index
                 || last_numbers != current_numbers
                 || last_cursor != self.cursor
-                || last_help != self.write_help;
+                || self.force_redraw;
             if redraw {
                 self.redraw()?;
             }
@@ -227,7 +234,6 @@ impl App {
             last_tab_index = self.tab_index;
             last_numbers = current_numbers;
             last_cursor = self.cursor;
-            last_help = self.write_help;
 
             self.cursor.set_terminal_cursor(&mut self.backend);
             self.backend.flush(redraw)?;
@@ -280,10 +286,12 @@ impl App {
                         // alt -> remove tab
                         KeyCode::Char('t') => {
                             if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                let left = Column::new(0);
-                                let right = Column::new(1);
-                                self.tabs.push([left, right]);
-                                self.tab_index = self.tabs.len() - 1;
+                                if self.tabs.len() < 6 {
+                                    let left = Column::new(0);
+                                    let right = Column::new(1);
+                                    self.tabs.push([left, right]);
+                                    self.tab_index = self.tabs.len() - 1;
+                                }
                             } else if event.modifiers.contains(KeyModifiers::ALT) {
                                 self.tabs.remove(self.tab_index);
                                 if self.tabs.is_empty() {
@@ -369,6 +377,7 @@ impl App {
                         }
                         KeyCode::Char('h' | 'H') => {
                             self.write_help = !self.write_help;
+                            self.force_redraw = true;
                         }
                         KeyCode::Char(' ') => self.handle_char_input('0'),
                         KeyCode::Char(char) => self.handle_char_input(char),
@@ -412,6 +421,7 @@ impl App {
                         self.set_number(number);
                     }
                 }
+                Event::Resize(width, height) => self.backend.update_terminal_size(width, height),
                 _ => {}
             }
         }

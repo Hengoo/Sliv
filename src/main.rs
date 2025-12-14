@@ -148,7 +148,6 @@ impl App {
             }
         }
 
-        self.force_redraw = false;
         Ok(())
     }
 
@@ -229,7 +228,9 @@ impl App {
                 || self.force_redraw;
             if redraw {
                 self.redraw()?;
+                self.force_redraw = false;
             }
+            assert!(!self.force_redraw);
 
             last_tab_index = self.tab_index;
             last_numbers = current_numbers;

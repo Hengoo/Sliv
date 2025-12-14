@@ -106,7 +106,7 @@ impl Backend {
                 let x = (i % self.size.width as usize) as u16;
                 let y = (i / self.size.width as usize) as u16;
 
-                if x > self.terminal_size.width || y > self.terminal_size.height {
+                if x >= self.terminal_size.width || y >= self.terminal_size.height {
                     if let Some(tmp) = first_pixel.as_ref() {
                         self.writer.queue(style::PrintStyledContent(
                             self.write_cache

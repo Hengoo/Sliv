@@ -47,6 +47,8 @@ const NUMBER_START_X: u8 = 8;
 // one row for tabs, one for horizontal line
 const NUMBER_START_Y: u8 = 2;
 const NUMBER_DIGIT_WIDTH: u8 = 26;
+// Max tabs is an arbitrary limitation to keep UI sane.
+const MAX_TABS: usize = 6;
 
 const COLOR_UNUSED_DIGIT: style::Color = style::Color::DarkGrey;
 
@@ -189,9 +191,9 @@ impl App {
             self.paste_from_clipboard(false);
         } else {
             // read all input numbers
-            // (Only support max 12 numbers)
-            if input_numbers.len() > 12 {
-                input_numbers.resize(12, 0);
+            // Keep tab limit in mind
+            if input_numbers.len() > MAX_TABS * 2 {
+                input_numbers.resize(MAX_TABS * 2, 0);
             }
             self.tabs.resize(
                 input_numbers.len().div_ceil(2),
@@ -287,7 +289,7 @@ impl App {
                         // alt -> remove tab
                         KeyCode::Char('t') => {
                             if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                if self.tabs.len() < 6 {
+                                if self.tabs.len() < MAX_TABS {
                                     let left = Column::new(0);
                                     let right = Column::new(1);
                                     self.tabs.push([left, right]);

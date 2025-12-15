@@ -26,8 +26,8 @@ pub enum CursorWriteMode {
 /// Not a general implementation, only containts what SLIV needs
 ///
 /// Additional benefits:
-/// - simpler to gracefully handle terminals that are too narrow to render the entire app (currently not implemented)
-/// - more efficent since we only push changed to crossterm
+/// - simpler to gracefully handle terminals that are too narrow to render the entire app
+/// - more efficent since we only push changed to crossterm (This helps to prevents flickering)
 #[derive(Debug)]
 pub struct Backend {
     writer: Writer,
@@ -88,9 +88,61 @@ impl Backend {
         // Cursor before writing is the one we want to show in the terminal later
         let cursor_backup = self.cursor;
 
-        if redraw {
-            // rendering must be in one big queue, otherwise it seems we get flickering
+        // rendering must be in one big queue, otherwise it seems we get flickering
 
+        if self.force_full_redraw {
+            // Redraw the last buffer (writing every pixel)
+            self.writer
+                .execute(terminal::Clear(terminal::ClearType::All))?;
+            // Combine changes from adjacent characters into one write
+            self.write_cache.clear();
+            let mut first_pixel: Option<Pixel> = None;
+            let mut first_pixel_y: Option<u16> = None;
+            self.writer.queue(cursor::MoveTo(0, 0))?;
+            for (i, p) in self.buffer_last.pixels.iter().enumerate() {
+                let x = (i % self.size.width as usize) as u16;
+                let y = (i / self.size.width as usize) as u16;
+                if x >= self.terminal_size.width || y >= self.terminal_size.height {
+                    if let Some(tmp) = first_pixel {
+                        self.writer.queue(style::PrintStyledContent(
+                            self.write_cache
+                                .as_str()
+                                .with(tmp.color)
+                                .on(tmp.background_color),
+                        ))?;
+                        self.write_cache.clear();
+                        first_pixel = None;
+                        first_pixel_y = None;
+                    }
+                    continue;
+                }
+                if let Some(tmp) = first_pixel.as_ref()
+                    && (first_pixel_y != Some(y)
+                        || tmp.color != p.color
+                        || tmp.background_color != p.background_color)
+                {
+                    // Cursor was already moved
+                    self.writer.queue(style::PrintStyledContent(
+                        self.write_cache
+                            .as_str()
+                            .with(tmp.color)
+                            .on(tmp.background_color),
+                    ))?;
+                    self.write_cache.clear();
+                    first_pixel = None;
+                    first_pixel_y = None;
+                }
+                if first_pixel.is_none() {
+                    first_pixel = Some(p.clone());
+                    first_pixel_y = Some(y);
+                    self.writer.queue(cursor::MoveTo(x, y))?;
+                }
+                self.write_cache.push(p.value);
+            }
+        }
+
+        if redraw {
+            // Compare the last buffer with new buffer and only write difference to crossterm
             // Combine changes from adjacent characters into one write
             self.write_cache.clear();
             let mut first_pixel: Option<Pixel> = None;
@@ -154,33 +206,6 @@ impl Backend {
 
             swap(&mut self.buffer, &mut self.buffer_last);
             self.clear();
-        } else if self.force_full_redraw {
-            self.writer
-                .execute(terminal::Clear(terminal::ClearType::All))?;
-            // (Write every pixel individually because I am to lazy)
-            self.write_cache.clear();
-            self.writer.queue(cursor::MoveTo(0, 0))?;
-            let mut last_y = 0;
-            for (i, p) in self.buffer_last.pixels.iter().enumerate() {
-                let x = (i % self.size.width as usize) as u16;
-                let y = (i / self.size.width as usize) as u16;
-                if x >= self.terminal_size.width || y >= self.terminal_size.height {
-                    continue;
-                }
-                self.write_cache.push(p.value);
-
-                if y != last_y {
-                    self.writer.queue(cursor::MoveTo(x, y))?;
-                }
-                self.writer.queue(style::PrintStyledContent(
-                    self.write_cache
-                        .as_str()
-                        .with(p.color)
-                        .on(p.background_color),
-                ))?;
-                self.write_cache.clear();
-                last_y = y;
-            }
         }
 
         self.cursor = cursor_backup;

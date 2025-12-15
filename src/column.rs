@@ -270,8 +270,7 @@ impl Column {
         self.index += 1;
         self.history.truncate(self.index);
 
-        // TODO Need to decide if I want to have some logic to merge history entries
-        //  recent edit, cursor not jumpet
+        //  recent edit, cursor not jumped
         self.history.push((number, cursor));
         self.edit_time = Instant::now();
     }

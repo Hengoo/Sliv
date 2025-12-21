@@ -9,9 +9,9 @@ use core::str;
 use std::ops::{Shl, Shr};
 use std::result::Result::Ok;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use arboard::Clipboard;
-use crossterm::event::MouseButton;
+use crossterm::event::{KeyEvent, MouseButton};
 use crossterm::{
     event::{Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, read},
     style::{self},
@@ -23,11 +23,10 @@ use format::{
     is_valid_character_automatic, parse_user_input, remove_character_automatic,
     replace_characters_automatic,
 };
-use std::io::Write;
 
 use crate::backend::{Backend, CursorWriteMode};
-use crate::column::LAST_ROW;
-use crate::format::REAL_NUMBER_STRING_WIDTH;
+use crate::column::is_float;
+use crate::format::{REAL_NUMBER_STRING_WIDTH, shift_characters_automatic};
 
 mod backend;
 mod column;
@@ -61,6 +60,10 @@ struct App {
     cursor_write_mode: CursorWriteMode,
     write_help: bool,
     force_redraw: bool,
+
+    // The buffer we edit floats in before the are "submitted"
+    // It is always applied to number, but we need to keep over multiple frames due to float error
+    float_buffer: Option<[u8; REAL_NUMBER_STRING_WIDTH]>,
 }
 
 impl App {
@@ -78,6 +81,7 @@ impl App {
             cursor_write_mode: write_mode,
             write_help: false,
             force_redraw: false,
+            float_buffer: None,
         })
     }
 
@@ -88,7 +92,23 @@ impl App {
     }
 
     fn set_number(&mut self, number: UNumber) {
-        self.tabs[self.tab_index][self.cursor.col as usize].set(number, self.cursor);
+        let lower_mask = UNumber::from(u32::MAX);
+        let upper_mask = !lower_mask;
+        match self.cursor.row {
+            Row::F32L => {
+                let (mut num, _) = self.get_current_column();
+                num &= upper_mask;
+                num |= number & lower_mask;
+                self.tabs[self.tab_index][self.cursor.col as usize].set(num, self.cursor);
+            }
+            Row::F32H => {
+                let (mut num, _) = self.get_current_column();
+                num &= lower_mask;
+                num |= number & upper_mask;
+                self.tabs[self.tab_index][self.cursor.col as usize].set(num, self.cursor);
+            }
+            _ => self.tabs[self.tab_index][self.cursor.col as usize].set(number, self.cursor),
+        }
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -108,25 +128,23 @@ impl App {
                 } else {
                     format::replace_characters_automatic(0, self.cursor, b"1")
                 };
-                Self::draw_column(&mut self.backend, tmp, cursor.col, true)?;
+                Self::draw_column(
+                    &mut self.backend,
+                    tmp,
+                    cursor.col,
+                    true,
+                    self.cursor,
+                    self.float_buffer.as_ref(),
+                )?;
             }
-            Self::draw_column(&mut self.backend, number, cursor.col, false)?;
-        }
-
-        // Float and double is a big edge case -> only here to visualize, not to edit
-        //  Not added to row enum to avoid a even bigger mess
-        for c in 0..COLUMN_COUNT {
-            let col = NUMBER_START_X + c as u8 * (NUMBER_DIGIT_WIDTH + 3);
-            let (number, _) = self.tabs[self.tab_index][c].get();
-
-            // Double
-            self.write_double(col, NUMBER_START_Y + LAST_ROW as u8 - 1, number)?;
-            // Float
-            // Second float is the second half of the 32 bits
-            let second_half = number.unbounded_shr(32);
-            self.write_float(col, NUMBER_START_Y + LAST_ROW as u8, second_half)?;
-            // If the float is truncated we highlight the text in yellow
-            self.write_float(col, NUMBER_START_Y + LAST_ROW as u8 + 1, number)?;
+            Self::draw_column(
+                &mut self.backend,
+                number,
+                cursor.col,
+                false,
+                self.cursor,
+                self.float_buffer.as_ref(),
+            )?;
         }
 
         // color differences
@@ -137,7 +155,7 @@ impl App {
         }
         let col_left = NUMBER_START_X;
         let col_right = NUMBER_START_X + NUMBER_DIGIT_WIDTH + 3;
-        for row in 0u16..=(Row::LowerPadding as u16) {
+        for row in 0u16..(Row::LowerPadding as u16) {
             for x in 0u16..u16::from(NUMBER_DIGIT_WIDTH) {
                 let y = row + u16::from(NUMBER_START_Y);
                 self.backend.set_background_color_if_different(
@@ -150,38 +168,6 @@ impl App {
             }
         }
 
-        Ok(())
-    }
-
-    fn write_double(&mut self, col: u8, row: u8, number: u64) -> Result<(), anyhow::Error> {
-        let mut text = [b' '; REAL_NUMBER_STRING_WIDTH];
-        let double = f64::from_ne_bytes(number.to_ne_bytes());
-        if write!(text.as_mut_slice(), "{double:>REAL_NUMBER_STRING_WIDTH$}").is_err() {
-            // Fallback to scientific if normal string formating does not fit
-            // If https://stackoverflow.com/a/1701085 is correct, then we need at max 24 chars for this
-            write!(text.as_mut_slice(), "{double:>REAL_NUMBER_STRING_WIDTH$.e}")
-                .context("Stackoverflow was wrong and the scientific representation of a double needs more than 26 chars")?;
-        }
-        self.backend.cursor_set(u16::from(col), u16::from(row));
-        self.backend.print(str::from_utf8(&text)?)?;
-        Ok(())
-    }
-
-    fn write_float(&mut self, col: u8, row: u8, number: u64) -> Result<(), anyhow::Error> {
-        let mut text = [b' '; REAL_NUMBER_STRING_WIDTH];
-        let float = f32::from_ne_bytes((number as u32).to_ne_bytes());
-        let is_float_truncated = number > u64::from(u32::MAX);
-        if write!(text.as_mut_slice(), "{float:>REAL_NUMBER_STRING_WIDTH$}").is_err() {
-            // Fallback to scientific if normal string formating does not fit
-            write!(text.as_mut_slice(), "{float:>REAL_NUMBER_STRING_WIDTH$.e}")?;
-        }
-        self.backend.cursor_set(u16::from(col), u16::from(row));
-        if is_float_truncated {
-            self.backend
-                .print_with_color(str::from_utf8(&text)?, style::Color::Yellow)?;
-        } else {
-            self.backend.print(str::from_utf8(&text)?)?;
-        }
         Ok(())
     }
 
@@ -218,174 +204,44 @@ impl App {
             self.tabs[self.tab_index][1].get().0,
         );
         let mut last_cursor = self.cursor;
+        let mut last_float_buffer = self.float_buffer;
         'update_loop: loop {
             let current_numbers = (
                 self.tabs[self.tab_index][0].get().0,
                 self.tabs[self.tab_index][1].get().0,
             );
+
+            // reset float buffer if row, col or tab changed
+            if self.tab_index != last_tab_index
+                || last_cursor.col != self.cursor.col
+                || last_cursor.row != self.cursor.row
+            {
+                self.float_buffer = None;
+            }
+
             // Avoid uneccessary redraws when the screen does not change
             let redraw = self.tab_index != last_tab_index
                 || last_numbers != current_numbers
                 || last_cursor != self.cursor
+                || last_float_buffer != self.float_buffer
                 || self.force_redraw;
             if redraw {
                 self.redraw()?;
                 self.force_redraw = false;
             }
-            assert!(!self.force_redraw);
 
             last_tab_index = self.tab_index;
             last_numbers = current_numbers;
             last_cursor = self.cursor;
+            last_float_buffer = self.float_buffer;
+            assert!(!self.force_redraw);
 
             self.cursor.set_terminal_cursor(&mut self.backend);
             self.backend.flush(redraw)?;
             match read()? {
                 Event::Key(event) => {
-                    match event.code {
-                        // eXecure character (same keybind as in VIM)
-                        KeyCode::Backspace | KeyCode::Char('x') => {
-                            let (num, _) = self.get_current_column();
-                            let num = remove_character_automatic(num, self.cursor);
-                            self.set_number(num);
-                        }
-                        KeyCode::Delete => {
-                            let (num, _) = self.get_current_column();
-                            let cursor_before = self.cursor;
-                            self.cursor.move_right();
-                            // We are already at the right edge -> delete does nothing
-                            if cursor_before != self.cursor {
-                                let num = remove_character_automatic(num, self.cursor);
-                                // Have cursor at the correct position for undo
-                                self.cursor = cursor_before;
-                                self.set_number(num);
-                                self.cursor.move_right();
-                            }
-                        }
-                        KeyCode::Enter => {}
-                        KeyCode::Left => {
-                            if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                self.move_cursor_home()?;
-                            } else {
-                                self.cursor.move_left();
-                            }
-                        }
-                        KeyCode::Right => {
-                            if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                self.move_cursor_end();
-                            } else {
-                                self.cursor.move_right();
-                            }
-                        }
-                        KeyCode::Up => self.cursor.move_up(),
-                        KeyCode::Down => self.cursor.move_down(),
-                        KeyCode::End => self.move_cursor_end(),
-                        KeyCode::Home => self.move_cursor_home()?,
-                        KeyCode::Tab | KeyCode::BackTab => {
-                            self.cursor.swap_column();
-                        }
-                        // go tab to right
-                        // ctrl -> new tab
-                        // alt -> remove tab
-                        KeyCode::Char('t') => {
-                            if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                if self.tabs.len() < MAX_TABS {
-                                    let left = Column::new(0);
-                                    let right = Column::new(1);
-                                    self.tabs.push([left, right]);
-                                    self.tab_index = self.tabs.len() - 1;
-                                }
-                            } else if event.modifiers.contains(KeyModifiers::ALT) {
-                                self.tabs.remove(self.tab_index);
-                                if self.tabs.is_empty() {
-                                    let left = Column::new(0);
-                                    let right = Column::new(1);
-                                    self.tabs.push([left, right]);
-                                }
-                                self.tab_index = self.tab_index.min(self.tabs.len() - 1);
-                            } else {
-                                self.tab_index += 1;
-                                self.tab_index %= self.tabs.len();
-                            }
-                        }
-                        // go tab to left
-                        KeyCode::Char('T') => {
-                            self.tab_index = self.tab_index.wrapping_sub(1);
-                            self.tab_index = self.tab_index.min(self.tabs.len() - 1);
-                        }
-
-                        // quit
-                        KeyCode::Char('q' | 'Q') => break 'update_loop,
-                        // undo
-                        KeyCode::Char('u') => {
-                            (_, self.cursor) = self.get_current_column();
-                            self.tabs[self.tab_index][usize::from(self.cursor.col)].undo();
-                        }
-                        // redo
-                        KeyCode::Char('U') => {
-                            self.tabs[self.tab_index][self.cursor.col as usize].redo();
-                            (_, self.cursor) = self.get_current_column();
-                        }
-                        // yank
-                        KeyCode::Char('y') => self.copy_to_clipboard(false)?,
-                        // yank without formatting
-                        KeyCode::Char('Y') => self.copy_to_clipboard(true)?,
-                        // Ctrl C is copy so it can be done with left hand if needed (exit is q)
-                        KeyCode::Char('c') => {
-                            if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                self.copy_to_clipboard(false)?;
-                            } else {
-                                self.handle_char_input('c');
-                            }
-                        }
-                        KeyCode::Insert => self.paste_from_clipboard(false),
-                        // paste
-                        KeyCode::Char('p') => self.paste_from_clipboard(false),
-                        // Ctrl V is paste, because why not
-                        KeyCode::Char('v') => {
-                            if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                self.paste_from_clipboard(false);
-                            }
-                        }
-                        // paste at position
-                        KeyCode::Char('P') => self.paste_from_clipboard(true),
-                        KeyCode::Char('<' | 'l') => {
-                            let (num, _) = self.get_current_column();
-                            self.set_number(num.shl(1));
-                        }
-                        KeyCode::Char('>' | 'r') => {
-                            let (num, _) = self.get_current_column();
-                            self.set_number(num.shr(1));
-                        }
-                        // rotate left
-                        KeyCode::Char('L') => {
-                            let (num, _) = self.get_current_column();
-                            self.set_number(num.rotate_left(1));
-                        }
-                        // rotate right
-                        KeyCode::Char('R') => {
-                            let (num, _) = self.get_current_column();
-                            self.set_number(num.rotate_right(1));
-                        }
-                        KeyCode::Char('s') => self.toggle_sign(),
-                        KeyCode::Char('-') => self.set_negative(),
-                        KeyCode::Char('+') => self.set_positive(),
-                        // toggle between insert and replace mode
-                        KeyCode::Char('i') => {
-                            self.cursor_write_mode = match self.cursor_write_mode {
-                                CursorWriteMode::Insert => CursorWriteMode::Replace,
-                                CursorWriteMode::Replace => CursorWriteMode::Insert,
-                            };
-                            self.backend.set_cursor_write_mode(self.cursor_write_mode);
-                        }
-                        KeyCode::Char('h' | 'H') => {
-                            self.write_help = !self.write_help;
-                            self.force_redraw = true;
-                        }
-                        KeyCode::Char(' ') => self.handle_char_input('0'),
-                        KeyCode::Char(char) => self.handle_char_input(char),
-                        KeyCode::Esc => {}
-                        _ => {}
+                    if self.handle_key_event(event)? {
+                        break 'update_loop;
                     }
                 }
                 Event::Mouse(MouseEvent {
@@ -429,6 +285,234 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    // returns true when the app should exit
+    fn handle_key_event(&mut self, event: KeyEvent) -> Result<bool> {
+        match event.code {
+            // eXecure character (same keybind as in VIM)
+            KeyCode::Backspace | KeyCode::Char('x') => {
+                if self.cursor_is_float() {
+                    if self.float_buffer.is_none() {
+                        self.init_float_buffer()?;
+                    }
+                    let buffer = self.float_buffer.as_mut().unwrap();
+                    let i = (self.cursor.text_pos - 1) as usize;
+                    buffer.copy_within(0..i, 1);
+                    buffer[0] = b' ';
+                    self.apply_float_buffer()?;
+                } else {
+                    let (num, _) = self.get_current_column();
+                    let num = remove_character_automatic(num, self.cursor);
+                    self.set_number(num);
+                }
+            }
+            KeyCode::Char('X') => {
+                self.float_buffer = None;
+                self.set_number(0);
+            }
+            KeyCode::Delete => {
+                if self.cursor_is_float() {
+                    let i = (self.cursor.text_pos - 1) as usize;
+                    if i < REAL_NUMBER_STRING_WIDTH - 1 {
+                        if self.float_buffer.is_none() {
+                            self.init_float_buffer()?;
+                        }
+                        let buffer = self.float_buffer.as_mut().unwrap();
+                        buffer.copy_within(0..=i, 1);
+                        buffer[0] = b' ';
+                        self.cursor.move_right();
+                        self.apply_float_buffer()?;
+                    }
+                } else {
+                    let (num, _) = self.get_current_column();
+                    let cursor_before = self.cursor;
+                    self.cursor.move_right();
+                    // We are already at the right edge -> delete does nothing
+                    if cursor_before != self.cursor {
+                        let num = remove_character_automatic(num, self.cursor);
+                        // Have cursor at the correct position for undo
+                        self.cursor = cursor_before;
+                        self.set_number(num);
+                        self.cursor.move_right();
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // Used to accept the float buffer
+                self.float_buffer = None;
+            }
+            KeyCode::Left => {
+                if event.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.move_cursor_home()?;
+                } else {
+                    self.cursor.move_left();
+                }
+            }
+            KeyCode::Right => {
+                if event.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.move_cursor_end();
+                } else {
+                    self.cursor.move_right();
+                }
+            }
+            KeyCode::Up => self.cursor.move_up(),
+            KeyCode::Down => self.cursor.move_down(),
+            KeyCode::End => self.move_cursor_end(),
+            KeyCode::Home => self.move_cursor_home()?,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.cursor.swap_column();
+            }
+            // go tab to right
+            // ctrl -> new tab
+            // alt -> remove tab
+            KeyCode::Char('t') => {
+                if event.modifiers.contains(KeyModifiers::CONTROL) {
+                    if self.tabs.len() < MAX_TABS {
+                        let left = Column::new(0);
+                        let right = Column::new(1);
+                        self.tabs.push([left, right]);
+                        self.tab_index = self.tabs.len() - 1;
+                    }
+                } else if event.modifiers.contains(KeyModifiers::ALT) {
+                    self.tabs.remove(self.tab_index);
+                    if self.tabs.is_empty() {
+                        let left = Column::new(0);
+                        let right = Column::new(1);
+                        self.tabs.push([left, right]);
+                    }
+                    self.tab_index = self.tab_index.min(self.tabs.len() - 1);
+                } else {
+                    self.tab_index += 1;
+                    self.tab_index %= self.tabs.len();
+                }
+            }
+            // go tab to left
+            KeyCode::Char('T') => {
+                self.tab_index = self.tab_index.wrapping_sub(1);
+                self.tab_index = self.tab_index.min(self.tabs.len() - 1);
+            }
+
+            // quit
+            KeyCode::Char('q' | 'Q') => {
+                return Ok(true);
+            }
+            // undo
+            KeyCode::Char('u') => {
+                self.float_buffer = None;
+                (_, self.cursor) = self.get_current_column();
+                self.tabs[self.tab_index][usize::from(self.cursor.col)].undo();
+            }
+            // redo
+            KeyCode::Char('U') => {
+                self.float_buffer = None;
+                self.tabs[self.tab_index][self.cursor.col as usize].redo();
+                (_, self.cursor) = self.get_current_column();
+            }
+            // yank
+            KeyCode::Char('y') => self.copy_to_clipboard(false)?,
+            // yank without formatting
+            KeyCode::Char('Y') => self.copy_to_clipboard(true)?,
+            // Ctrl C is copy so it can be done with left hand if needed (exit is q)
+            KeyCode::Char('c') => {
+                if event.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.copy_to_clipboard(false)?;
+                } else {
+                    self.handle_char_input('c')?;
+                }
+            }
+            KeyCode::Insert => self.paste_from_clipboard(false),
+            // paste
+            KeyCode::Char('p') => self.paste_from_clipboard(false),
+            // Ctrl V is paste, because why not
+            KeyCode::Char('v') => {
+                if event.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.paste_from_clipboard(false);
+                }
+            }
+            // paste at position
+            KeyCode::Char('P') => self.paste_from_clipboard(true),
+
+            KeyCode::Char('<') => {
+                let (mut num, _) = self.get_current_column();
+                let mut tmp = self.cursor;
+                tmp.row = match tmp.row {
+                    Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => Row::Bin3,
+                    _ => tmp.row,
+                };
+                tmp.text_pos = Cursor::default().text_pos;
+                num = shift_characters_automatic(num, tmp, 1);
+                self.set_number(num);
+            }
+            KeyCode::Char('>') => {
+                let (mut num, _) = self.get_current_column();
+                let mut tmp = self.cursor;
+                tmp.row = match tmp.row {
+                    Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => Row::Bin3,
+                    _ => tmp.row,
+                };
+                tmp.text_pos = Cursor::default().text_pos;
+                num = shift_characters_automatic(num, tmp, -1);
+                self.set_number(num);
+            }
+            KeyCode::Char('l') => {
+                let (num, _) = self.get_current_column();
+                self.set_number(num.shl(1));
+            }
+            KeyCode::Char('r') => {
+                let (num, _) = self.get_current_column();
+                self.set_number(num.shr(1));
+            }
+            // rotate left
+            KeyCode::Char('L') => {
+                let (num, _) = self.get_current_column();
+                self.set_number(num.rotate_left(1));
+            }
+            // rotate right
+            KeyCode::Char('R') => {
+                let (num, _) = self.get_current_column();
+                self.set_number(num.rotate_right(1));
+            }
+            KeyCode::Char('s') => self.toggle_sign(),
+            KeyCode::Char('-') => self.set_negative(),
+            KeyCode::Char('+') => self.set_positive(),
+            // toggle between insert and replace mode
+            KeyCode::Char('i') => {
+                self.cursor_write_mode = match self.cursor_write_mode {
+                    CursorWriteMode::Insert => CursorWriteMode::Replace,
+                    CursorWriteMode::Replace => CursorWriteMode::Insert,
+                };
+                self.backend.set_cursor_write_mode(self.cursor_write_mode);
+            }
+            KeyCode::Char('h' | 'H') => {
+                self.write_help = !self.write_help;
+                self.force_redraw = true;
+            }
+            KeyCode::Char(' ') => {
+                let _ = self.handle_char_input('0')?;
+            }
+            KeyCode::Char('f' | 'F') => {
+                if self.cursor_is_float() {
+                    self.set_number(parse_user_input("inf", self.cursor.row).unwrap());
+                    self.float_buffer = None;
+                } else {
+                    let _ = self.handle_char_input('f')?;
+                }
+            }
+            KeyCode::Char('n' | 'N') => {
+                if self.cursor_is_float() {
+                    self.set_number(parse_user_input("nan", self.cursor.row).unwrap());
+                    self.float_buffer = None;
+                } else {
+                    let _ = self.handle_char_input('n')?;
+                }
+            }
+            KeyCode::Char(char) => {
+                let _ = self.handle_char_input(char)?;
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn set_cursor_from_mouse(&mut self, column: u16, row: u16) {
@@ -511,7 +595,15 @@ impl App {
     // Move to leftmost position, but not further than the number itself
     fn move_cursor_home(&mut self) -> Result<(), anyhow::Error> {
         let (num, _) = self.get_current_column();
-        let text = format_automatic(num, self.cursor.row)?;
+        let text = self
+            .float_buffer
+            .map(|t| {
+                let mut res = [b' '; NUMBER_STRING_WIDTH];
+                res[NUMBER_STRING_WIDTH - REAL_NUMBER_STRING_WIDTH..].copy_from_slice(&t);
+                Ok(res)
+            })
+            .unwrap_or_else(|| format_automatic(num, self.cursor.row))?;
+
         let trimmed = text.trim_ascii_start();
         self.cursor.text_pos = NUMBER_DIGIT_WIDTH - trimmed.len() as u8;
         self.cursor.fix_left();
@@ -525,12 +617,42 @@ impl App {
         self.cursor.fix_right();
     }
 
-    fn handle_char_input(&mut self, char: char) {
+    fn apply_float_buffer(&mut self) -> Result<()> {
+        if let Some(num) = parse_user_input(
+            str::from_utf8(self.float_buffer.as_ref().unwrap())?,
+            self.cursor.row,
+        ) {
+            self.set_number(num);
+        }
+        Ok(())
+    }
+
+    // Returns true when the character was a valid key
+    fn handle_char_input(&mut self, char: char) -> Result<bool> {
         let (num, _) = self.get_current_column();
 
         // skip input that is currently not valid
         if !is_valid_character_automatic(char as u8, self.cursor.row) {
-            return;
+            return Ok(false);
+        }
+
+        if self.cursor_is_float() {
+            if self.float_buffer.is_none() {
+                self.init_float_buffer()?;
+            }
+            let buffer: &mut [u8; 26] = self.float_buffer.as_mut().unwrap();
+            let i = (self.cursor.text_pos - 1) as usize;
+
+            if matches!(self.cursor_write_mode, CursorWriteMode::Insert) {
+                buffer.copy_within(1..=i, 0);
+            }
+            buffer[i] = char as u8;
+            if matches!(self.cursor_write_mode, CursorWriteMode::Replace) {
+                self.cursor.move_right();
+            }
+
+            self.apply_float_buffer()?;
+            return Ok(true);
         }
 
         match self.cursor_write_mode {
@@ -541,34 +663,69 @@ impl App {
             CursorWriteMode::Replace => {
                 let num = replace_characters_automatic(num, self.cursor, &[char as u8]);
                 self.set_number(num);
+                self.cursor.move_right();
             }
         }
+        Ok(true)
+    }
+
+    const fn cursor_is_float(&self) -> bool {
+        is_float(self.cursor.row)
+    }
+
+    fn init_float_buffer(&mut self) -> Result<()> {
+        let (num, _) = self.get_current_column();
+        let tmp = format_automatic(num, self.cursor.row)?;
+        let mut buffer = [b' '; REAL_NUMBER_STRING_WIDTH];
+        buffer.copy_from_slice(&tmp[NUMBER_STRING_WIDTH - REAL_NUMBER_STRING_WIDTH..]);
+        self.float_buffer = Some(buffer);
+        Ok(())
     }
 
     fn toggle_sign(&mut self) {
         let (num, _) = self.get_current_column();
-        let signed = format::handle_negative(num);
-        if let Some(neg) = signed.checked_neg() {
-            self.set_number(neg as UNumber);
-        } else {
-            // this can only happen if singed num was MIN
-            self.set_number((INumber::MAX) as UNumber + 1);
+
+        match self.cursor.row {
+            // for the floats we just flip the signed bit
+            Row::F64 | Row::F32H => self.set_number(num ^ 0x8000_0000_0000_0000),
+            Row::F32L => self.set_number(num ^ 0x8000_0000),
+            _ => {
+                let signed = format::handle_negative(num);
+                if let Some(neg) = signed.checked_neg() {
+                    self.set_number(neg as UNumber);
+                } else {
+                    // this can only happen if singed num was MIN
+                    self.set_number((INumber::MAX) as UNumber + 1);
+                }
+            }
         }
     }
 
     fn set_positive(&mut self) {
         let (num, _) = self.get_current_column();
-        let signed = format::handle_negative(num);
-        if signed.is_negative() {
-            self.toggle_sign();
+        match self.cursor.row {
+            Row::F64 | Row::F32H => self.set_number(num | 0x8000_0000_0000_0000),
+            Row::F32L => self.set_number(num | 0x8000_0000),
+            _ => {
+                let signed = format::handle_negative(num);
+                if signed.is_negative() {
+                    self.toggle_sign();
+                }
+            }
         }
     }
 
     fn set_negative(&mut self) {
         let (num, _) = self.get_current_column();
-        let signed = format::handle_negative(num);
-        if signed.is_positive() {
-            self.toggle_sign();
+        match self.cursor.row {
+            Row::F64 | Row::F32H => self.set_number(num & !0x8000_0000_0000_0000),
+            Row::F32L => self.set_number(num & !0x8000_0000),
+            _ => {
+                let signed = format::handle_negative(num);
+                if signed.is_positive() {
+                    self.toggle_sign();
+                }
+            }
         }
     }
 
@@ -576,9 +733,11 @@ impl App {
         b: &mut Backend,
         text: [u8; NUMBER_STRING_WIDTH],
         col: u8,
-        row: u8,
+        row: u8, // this is NOT the ROW, but the row in the terminal
         write_background: bool,
+        color: Option<style::Color>,
     ) -> Result<()> {
+        // Background is refering to the gray zeroes indicating what would change when you write a number
         if write_background {
             let mut background = [b' '; NUMBER_STRING_WIDTH];
             for (input, back) in text.iter().zip(background.iter_mut()) {
@@ -602,7 +761,12 @@ impl App {
                 u16::from(col) + u16::from(NUMBER_DIGIT_WIDTH) - trim.len() as u16,
                 u16::from(row),
             );
-            b.print(str::from_utf8(trim)?)?;
+
+            if let Some(color) = color {
+                b.print_with_color(str::from_utf8(trim)?, color)?;
+            } else {
+                b.print(str::from_utf8(trim)?)?;
+            }
         }
 
         Ok(())
@@ -611,15 +775,65 @@ impl App {
     fn draw_column(
         b: &mut Backend,
         number: UNumber,
-        column_index: u8,
+        col: u8,
         write_background: bool,
+        current_cursor: Cursor,
+        overwrite: Option<&[u8; REAL_NUMBER_STRING_WIDTH]>,
     ) -> Result<()> {
-        let col = NUMBER_START_X + column_index * (NUMBER_DIGIT_WIDTH + 3);
+        let x_pos = NUMBER_START_X + col * (NUMBER_DIGIT_WIDTH + 3);
 
-        for i in 1u8..8u8 {
+        for i in 1u8..11u8 {
             let row = Row::try_from(i).unwrap();
-            let text = format_automatic(number, row);
-            Self::write_trimmed(b, text?, col, row as u8 + 1, write_background)?;
+
+            let text = if row == current_cursor.row
+                && col == current_cursor.col
+                && let Some(overwrite) = overwrite
+            {
+                let mut text = [b' '; NUMBER_STRING_WIDTH];
+                text[NUMBER_STRING_WIDTH - REAL_NUMBER_STRING_WIDTH..].copy_from_slice(overwrite);
+                text
+            } else {
+                format_automatic(number, row)?
+            };
+
+            // grey zero backround cursor hint
+            if write_background {
+                // float does not support this hint
+                let mut skip = is_float(row);
+                // disable hint for rows the cursor is not on
+                if matches!(row, Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3) {
+                    skip |= !matches!(
+                        current_cursor.row,
+                        Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3
+                    );
+                } else {
+                    skip |= row != current_cursor.row;
+                }
+                if skip {
+                    continue;
+                }
+                Self::write_trimmed(
+                    b,
+                    text,
+                    x_pos,
+                    row as u8 + 1,
+                    write_background,
+                    Some(COLOR_UNUSED_DIGIT),
+                )?;
+                continue;
+            }
+            if row == Row::F32L && number >= UNumber::from(u32::MAX) {
+                Self::write_trimmed(
+                    b,
+                    text,
+                    x_pos,
+                    row as u8 + 1,
+                    write_background,
+                    Some(style::Color::Yellow),
+                )?;
+                continue;
+            }
+            Self::write_trimmed(b, text, x_pos, row as u8 + 1, write_background, None)?;
         }
         Ok(())
     }
@@ -700,15 +914,18 @@ impl App {
             b.println("'q'           quit")?;
             b.println("number (when in hex row also abcdef or ABCDEF) to write number.")?;
             b.println("' '           is treated as '0'")?;
-            b.println("'Backspace'   remove character left of cursor")?;
+            b.println("'Backspace', 'x'   remove character left of cursor")?;
+            b.println("'X'           set number to zero")?;
             b.println("'Delete'      remove characters")?;
             b.println("'i'           toggle input mode between insert and replace")?;
             b.println("'u'           undo")?;
             b.println("'U'           redo")?;
 
             b.cursor_move_to_next_line(1);
-            b.println("'>', 'r'      right shift binary")?;
-            b.println("'<', 'l'      left  shift binary")?;
+            b.println("'>'           right shift")?;
+            b.println("'<'           left  shift")?;
+            b.println("'r'           right shift binary")?;
+            b.println("'l'           left  shift binary")?;
             b.println("'R'           right rotate binary")?;
             b.println("'L'           left  rotate binary")?;
 
@@ -748,6 +965,13 @@ impl App {
             b.println("'Alt_t'       delete tab")?;
             b.println("'t',          navigate to next tab")?;
             b.println("'T'           navigate to previous tab")?;
+
+            b.cursor_move_to_next_line(1);
+            b.print_with_color("Float specifics:", style::Color::Grey)?;
+            b.cursor_move_to_next_line(1);
+            b.println("'f'           Set to infinity")?;
+            b.println("'n'           Set to NaN")?;
+            b.println("'Enter'       Accept the temporary float number")?;
         }
         Ok(())
     }

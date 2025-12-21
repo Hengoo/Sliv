@@ -216,7 +216,7 @@ impl Backend {
     }
 
     fn clear(&mut self) {
-        for p in self.buffer.pixels.iter_mut() {
+        for p in &mut self.buffer.pixels {
             *p = Pixel::default();
         }
     }

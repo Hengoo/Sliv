@@ -20,8 +20,7 @@ const UP: u8 = u8::MAX - 5;
 // DownPadding
 const DP: u8 = u8::MAX - 6;
 // table has padding in all directions to simplify edge cases
-// TODO would be fancy to have custom accessor types? (using row enum, and maybe custom type for column????)
-pub const LOOKUP_TABLE: [[u8; 28]; 9] = [
+pub const LOOKUP_TABLE: [[u8; 28]; 12] = [
     // upper padding
     [
         UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP, UP,
@@ -62,6 +61,21 @@ pub const LOOKUP_TABLE: [[u8; 28]; 9] = [
         UJ, UJ, UJ, UJ, UJ, UJ, UJ, UJ, 15, 14, 13, 12, SC, 11, 10, 9, 8, SC, 7, 6, 5, 4, SC, 3, 2,
         1, 0, ER,
     ],
+    // F64
+    [
+        EL, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2,
+        1, 0, ER,
+    ],
+    // F32H
+    [
+        EL, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2,
+        1, 0, ER,
+    ],
+    // F32L
+    [
+        EL, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2,
+        1, 0, ER,
+    ],
     // lower padding
     [
         DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP, DP,
@@ -81,7 +95,14 @@ pub enum Row {
     Bin1,
     Bin2,
     Bin3,
+    F64,
+    F32H,
+    F32L,
     LowerPadding,
+}
+
+pub const fn is_float(row: Row) -> bool {
+    matches!(row, Row::F64 | Row::F32H | Row::F32L)
 }
 
 pub const LAST_ROW: Row = Row::LowerPadding;

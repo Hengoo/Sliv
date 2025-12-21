@@ -5,4 +5,5 @@ Sliv is a small terminal app to inspect numbers in different representations:
 - signed integer  
 - hexadecimal  
 - binary  
-- limited float support (no writing)  
+- double
+- float 

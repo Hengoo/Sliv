@@ -4,7 +4,10 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use core::str;
-use std::{io::Write, ops::Shl};
+use std::{
+    io::Write,
+    ops::{Shl, Shr},
+};
 
 // Computations and formating is done with [u8; NUMBER_STRING_WIDTH] on the stack
 // Assumptions used in this file that are not validated:
@@ -85,6 +88,7 @@ pub const fn hex_to_u8_char(number: UNumber, offset: u32) -> u8 {
         _ => unreachable!(),
     }
 }
+const VALID_FLOAT_CHARACTERS: &[u8; 15] = b"0123456789.eE+-";
 
 // Convert to negative interpretaton IF it aligns with one of
 // the common integer sizes (i8, i16. i32, i64, i128)
@@ -187,6 +191,28 @@ pub fn format_hexadecimal(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> 
     Ok(text)
 }
 
+pub fn format_f64(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
+    let mut text = [b' '; NUMBER_STRING_WIDTH];
+    let double = f64::from_ne_bytes(number.to_ne_bytes());
+    if write!(&mut text[6..], "{double:>REAL_NUMBER_STRING_WIDTH$}").is_err() {
+        // Fallback to scientific if normal string formating does not fit
+        // If https://stackoverflow.com/a/1701085 is correct, then we need at max 24 chars for this
+        write!(&mut text[6..], "{double:>REAL_NUMBER_STRING_WIDTH$.e}")
+                .context("Stackoverflow was wrong and the scientific representation of a double needs more than 26 chars")?;
+    }
+    Ok(text)
+}
+
+pub fn format_f32(number: UNumber) -> Result<[u8; NUMBER_STRING_WIDTH]> {
+    let mut text = [b' '; NUMBER_STRING_WIDTH];
+    let float = f32::from_ne_bytes((number as u32).to_ne_bytes());
+    if write!(&mut text[6..], "{float:>REAL_NUMBER_STRING_WIDTH$}").is_err() {
+        // Fallback to scientific if normal string formating does not fit
+        write!(&mut text[6..], "{float:>REAL_NUMBER_STRING_WIDTH$.e}")?;
+    }
+    Ok(text)
+}
+
 pub fn format_automatic(number: UNumber, row: Row) -> Result<[u8; NUMBER_STRING_WIDTH]> {
     match row {
         Row::Decimal => format_decimal(number),
@@ -213,16 +239,22 @@ pub fn format_automatic(number: UNumber, row: Row) -> Result<[u8; NUMBER_STRING_
             }
             Ok(text)
         }
+        Row::F64 => format_f64(number),
+        Row::F32H => format_f32(number.shr(32)),
+        Row::F32L => format_f32(u64::from(number as u32)),
         _ => Err(anyhow!("Wrong row")),
     }
 }
 
-fn parse_decimal(mut input: String) -> Option<UNumber> {
-    input = input.trim().into();
+fn parse_decimal(input: &str) -> Option<UNumber> {
+    let mut input: String = input.trim().into();
     if input.starts_with("0x")
         || input.starts_with("0b")
         || input.starts_with("0o")
         || input.starts_with('-')
+        || input.ends_with('d')
+        || input.ends_with('f')
+        || input.contains('.')
     {
         return None;
     }
@@ -230,8 +262,15 @@ fn parse_decimal(mut input: String) -> Option<UNumber> {
     UNumber::from_str_radix(&input, 10).ok()
 }
 
-fn parse_signed(mut input: String) -> Option<UNumber> {
-    if input.starts_with("0x") || input.starts_with("0b") || input.starts_with("0o") {
+fn parse_signed(input: &str) -> Option<UNumber> {
+    let mut input: String = input.trim().into();
+    if input.starts_with("0x")
+        || input.starts_with("0b")
+        || input.starts_with("0o")
+        || input.ends_with('d')
+        || input.ends_with('f')
+        || input.contains('.')
+    {
         return None;
     }
     input.retain(|c| c.is_ascii_digit() || c == '-');
@@ -239,46 +278,117 @@ fn parse_signed(mut input: String) -> Option<UNumber> {
     signed.map(|num| num as UNumber)
 }
 
-fn parse_hex(mut input: String) -> Option<UNumber> {
-    if input.starts_with("0b") || input.starts_with("0o") || input.starts_with('-') {
+fn parse_hex(input: &str) -> Option<UNumber> {
+    let mut input: String = input.trim().into();
+    if input.starts_with("0b")
+        || input.starts_with("0o")
+        || input.starts_with('-')
+        || input.ends_with('d')
+        || input.ends_with('f')
+        || input.contains('.')
+    {
         return None;
     }
     input.retain(|c| c.is_ascii_hexdigit());
     UNumber::from_str_radix(&input, 16).ok()
 }
 
-fn parse_bin(mut input: String) -> Option<UNumber> {
-    if input.starts_with("0x") || input.starts_with("0o") || input.starts_with('-') {
-        return None;
-    }
-    input.retain(|c| c.is_digit(2));
-    UNumber::from_str_radix(&input, 2).ok()
-}
-
-fn parse_oct(mut input: String) -> Option<UNumber> {
-    if input.starts_with("0b") || input.starts_with("0x") || input.starts_with('-') {
+fn parse_oct(input: &str) -> Option<UNumber> {
+    let mut input: String = input.trim().into();
+    if input.starts_with("0b")
+        || input.starts_with("0x")
+        || input.starts_with('-')
+        || input.ends_with('d')
+        || input.ends_with('f')
+        || input.contains('.')
+    {
         return None;
     }
     input.retain(|c| c.is_digit(8));
     UNumber::from_str_radix(&input, 8).ok()
 }
 
+fn parse_bin(input: &str) -> Option<UNumber> {
+    let mut input: String = input.trim().into();
+    if input.starts_with("0x")
+        || input.starts_with("0o")
+        || input.starts_with('-')
+        || input.ends_with('d')
+        || input.ends_with('f')
+        || input.contains('.')
+    {
+        return None;
+    }
+    input.retain(|c| c.is_digit(2));
+    UNumber::from_str_radix(&input, 2).ok()
+}
+
+fn parse_f64(mut input: &str) -> Option<UNumber> {
+    input = input.trim();
+    if input.starts_with("0b") || input.starts_with("0x") || input.starts_with("0o") {
+        return None;
+    }
+    input = input.trim_end_matches('d');
+    if input.is_empty() {
+        return Some(0);
+    }
+    input
+        .parse::<f64>()
+        .ok()
+        .map(|f| UNumber::from_ne_bytes(f.to_ne_bytes()))
+}
+
+fn parse_f32(mut input: &str, row: Row) -> Option<UNumber> {
+    input = input.trim();
+    if input.starts_with("0b")
+        || input.starts_with("0x")
+        || input.starts_with("0o")
+        || input.ends_with('d')
+    {
+        return None;
+    }
+    if !input.ends_with("inf") {
+        input = input.trim_end_matches('f');
+    }
+    if !input.ends_with("INF") {
+        input = input.trim_end_matches('F');
+    }
+    if input.is_empty() {
+        return Some(0);
+    }
+    match row {
+        Row::F32H => input
+            .parse::<f32>()
+            .ok()
+            .map(|f| UNumber::from(u32::from_ne_bytes(f.to_ne_bytes())).rotate_left(32)),
+        Row::F32L => input
+            .parse::<f32>()
+            .ok()
+            .map(|f| UNumber::from(u32::from_ne_bytes(f.to_ne_bytes()))),
+        _ => unreachable!(),
+    }
+}
+
 pub fn parse_user_input(input: &str, row: Row) -> Option<UNumber> {
     let input = input.trim();
     // first try parsing by type of cursor position
     let result = match row {
-        Row::Decimal => parse_decimal(input.into()),
-        Row::Signed => parse_signed(input.into()),
-        Row::Hex => parse_hex(input.into()),
-        Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => parse_bin(input.into()),
+        Row::Decimal => parse_decimal(input),
+        Row::Signed => parse_signed(input),
+        Row::Hex => parse_hex(input),
+        Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => parse_bin(input),
+        Row::F64 => parse_f64(input),
+        Row::F32H | Row::F32L => parse_f32(input, row),
         _ => None,
     };
     result
-        .or_else(|| parse_decimal(input.into()))
-        .or_else(|| parse_signed(input.into()))
-        .or_else(|| parse_hex(input.into()))
-        .or_else(|| parse_bin(input.into()))
-        .or_else(|| parse_oct(input.into()))
+        .or_else(|| parse_decimal(input))
+        .or_else(|| parse_signed(input))
+        .or_else(|| parse_hex(input))
+        .or_else(|| parse_bin(input))
+        .or_else(|| parse_oct(input))
+        .or_else(|| parse_f32(input, Row::F32L))
+        .or_else(|| parse_f64(input))
 }
 
 pub fn replace_characters_automatic(number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
@@ -428,6 +538,7 @@ fn replace_chars_bin(mut number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumb
     number
 }
 
+// Shifts the caracters at the left of the cursor position in the requested direction
 pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) -> UNumber {
     if shift == 0 {
         return number;
@@ -496,11 +607,13 @@ pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) ->
 }
 
 // valid characters that are actualy "numbers" (excluding '-')
-pub const fn is_valid_character_automatic(char: u8, row: Row) -> bool {
+pub fn is_valid_character_automatic(char: u8, row: Row) -> bool {
     match row {
         Row::Decimal | Row::Signed => char.is_ascii_digit(),
         Row::Hex => char.is_ascii_hexdigit(),
         Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => char == b'0' || char == b'1',
+        Row::F64 | Row::F32H | Row::F32L => VALID_FLOAT_CHARACTERS.contains(&char),
+
         _ => false,
     }
 }
@@ -544,55 +657,94 @@ mod tests {
     #[test]
     fn test_parse() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
-        assert_eq!(parse_decimal("123".into()).unwrap(), 123);
-        assert_eq!(parse_decimal("1,2,3".into()).unwrap(), 123);
-        assert_eq!(parse_decimal("0000,,,123,,".into()).unwrap(), 123);
+        assert_eq!(parse_decimal("123").unwrap(), 123);
+        assert_eq!(parse_decimal("1,2,3").unwrap(), 123);
+        assert_eq!(parse_decimal("0000,,,123,,").unwrap(), 123);
+        assert_eq!(parse_decimal("1,234,567,890").unwrap(), 1_234_567_890);
         assert_eq!(
-            parse_decimal("1,234,567,890".into()).unwrap(),
-            1_234_567_890
-        );
-        assert_eq!(
-            parse_decimal("16,469,343,685,676,293,330".into()).unwrap(),
+            parse_decimal("16,469,343,685,676,293,330").unwrap(),
             16_469_343_685_676_293_330
         );
 
-        assert_eq!(parse_signed("123".into()).unwrap(), 123);
-        assert_eq!(parse_signed("1,2,3".into()).unwrap(), 123);
-        assert_eq!(parse_signed(",,,123,,".into()).unwrap(), 123);
-        assert_eq!(parse_signed("1,234,567,890".into()).unwrap(), 1_234_567_890);
-        assert_eq!(handle_negative(parse_signed("-123".into()).unwrap()), -123);
+        assert_eq!(parse_signed("123").unwrap(), 123);
+        assert_eq!(parse_signed("1,2,3").unwrap(), 123);
+        assert_eq!(parse_signed(",,,123,,").unwrap(), 123);
+        assert_eq!(parse_signed("1,234,567,890").unwrap(), 1_234_567_890);
+        assert_eq!(handle_negative(parse_signed("-123").unwrap()), -123);
+        assert_eq!(handle_negative(parse_signed("-1,2,3").unwrap()), -123);
+        assert_eq!(handle_negative(parse_signed(",,,-123,,").unwrap()), -123);
         assert_eq!(
-            handle_negative(parse_signed("-1,2,3".into()).unwrap()),
-            -123
-        );
-        assert_eq!(
-            handle_negative(parse_signed(",,,-123,,".into()).unwrap()),
-            -123
-        );
-        assert_eq!(
-            handle_negative(parse_signed("-1,234,567,890".into()).unwrap()),
+            handle_negative(parse_signed("-1,234,567,890").unwrap()),
             -1_234_567_890
         );
         assert_eq!(
-            handle_negative(parse_signed("-1,977,400,388,033,258,286".into()).unwrap()),
+            handle_negative(parse_signed("-1,977,400,388,033,258,286").unwrap()),
             -1_977_400_388_033_258_286
         );
 
-        assert_eq!(parse_hex("2A".into()).unwrap(), 42);
-        assert_eq!(parse_hex("7 5B CD 15".into()).unwrap(), 123_456_789);
-        assert_eq!(parse_hex("49 96 02 D2".into()).unwrap(), 1_234_567_890);
+        assert_eq!(parse_hex("2A").unwrap(), 42);
+        assert_eq!(parse_hex("7 5B CD 15").unwrap(), 123_456_789);
+        assert_eq!(parse_hex("49 96 02 D2").unwrap(), 1_234_567_890);
         assert_eq!(
-            parse_hex("E4 8E DC D2 E4 8E DC D2".into()).unwrap(),
+            parse_hex("E4 8E DC D2 E4 8E DC D2").unwrap(),
             16_469_343_685_676_293_330
         );
-        assert_eq!(parse_hex("AFFEEE".into()).unwrap(), 11_534_062);
+        assert_eq!(parse_hex("AFFEEE").unwrap(), 11_534_062);
 
-        assert_eq!(parse_bin("1111".into()).unwrap(), 15);
-        assert_eq!(parse_bin("11111111".into()).unwrap(), 255);
-        assert_eq!(parse_bin("11  1 1  1 1 1 1".into()).unwrap(), 255);
-        assert_eq!(parse_bin("10 1010".into()).unwrap(), 42);
-        assert_eq!(parse_bin("1111 0010".into()).unwrap(), 242);
-        assert_eq!(parse_bin("1 0101 1110 0011 0110".into()).unwrap(), 89654);
+        assert_eq!(parse_bin("1111").unwrap(), 15);
+        assert_eq!(parse_bin("11111111").unwrap(), 255);
+        assert_eq!(parse_bin("11  1 1  1 1 1 1").unwrap(), 255);
+        assert_eq!(parse_bin("10 1010").unwrap(), 42);
+        assert_eq!(parse_bin("1111 0010").unwrap(), 242);
+        assert_eq!(parse_bin("1 0101 1110 0011 0110").unwrap(), 89654);
+
+        assert_eq!(parse_f32("1.0", Row::F32L).unwrap(), 0x3f80_0000);
+        assert_eq!(parse_f32("1", Row::F32L).unwrap(), 0x3f80_0000);
+        assert_eq!(parse_f32("1.0f", Row::F32L).unwrap(), 0x3f80_0000);
+        assert_eq!(parse_f32("1.0d", Row::F32L), None);
+        assert_eq!(parse_f32("1.0", Row::F32H).unwrap(), 0x3f80_0000_0000_0000);
+
+        assert_eq!(
+            parse_f32("inf", Row::F32L).unwrap(),
+            UNumber::from(u32::from_ne_bytes(f32::INFINITY.to_ne_bytes()))
+        );
+        assert_eq!(
+            parse_f32("INF", Row::F32L).unwrap(),
+            UNumber::from(u32::from_ne_bytes(f32::INFINITY.to_ne_bytes()))
+        );
+        assert_eq!(
+            parse_f32("-inf", Row::F32L).unwrap(),
+            UNumber::from(u32::from_ne_bytes(f32::NEG_INFINITY.to_ne_bytes()))
+        );
+        assert_eq!(
+            parse_f32("nan", Row::F32L).unwrap(),
+            UNumber::from(u32::from_ne_bytes(f32::NAN.to_ne_bytes()))
+        );
+        assert_eq!(
+            parse_f32("NAN", Row::F32L).unwrap(),
+            UNumber::from(u32::from_ne_bytes(f32::NAN.to_ne_bytes()))
+        );
+        assert_eq!(
+            parse_f32("NaN", Row::F32L).unwrap(),
+            UNumber::from(u32::from_ne_bytes(f32::NAN.to_ne_bytes()))
+        );
+
+        assert_eq!(parse_f64("1").unwrap(), 0x3FF0_0000_0000_0000);
+        assert_eq!(parse_f64("1.0").unwrap(), 0x3FF0_0000_0000_0000);
+        assert_eq!(parse_f64("1.0d").unwrap(), 0x3FF0_0000_0000_0000);
+        assert_eq!(parse_f64("1.0f"), None);
+        assert_eq!(
+            parse_f64("inf").unwrap(),
+            UNumber::from_ne_bytes(f64::INFINITY.to_ne_bytes())
+        );
+        assert_eq!(
+            parse_f64("-inf").unwrap(),
+            UNumber::from_ne_bytes(f64::NEG_INFINITY.to_ne_bytes())
+        );
+        assert_eq!(
+            parse_f64("nan").unwrap(),
+            UNumber::from_ne_bytes(f64::NAN.to_ne_bytes())
+        );
     }
 
     fn prep(text: Result<[u8; NUMBER_STRING_WIDTH]>) -> String {
@@ -649,6 +801,11 @@ mod tests {
             "-1,977,400,388,033,258,286"
         );
         assert_eq!(prep(format_hexadecimal(num)), "E4 8E DC D2 E4 8E DC D2");
+
+        let num = 0x3f80_0000;
+        assert_eq!(prep(format_f32(num)), "1");
+        let num = 0x3ff0_0000_0000_0000;
+        assert_eq!(prep(format_f64(num)), "1");
     }
 
     #[test]

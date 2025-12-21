@@ -329,6 +329,8 @@ fn parse_f64(mut input: &str) -> Option<UNumber> {
         return None;
     }
     input = input.trim_end_matches('d');
+    let mut input: String = input.into();
+    input.retain(|c| c != ' ');
     if input.is_empty() {
         return Some(0);
     }
@@ -353,6 +355,8 @@ fn parse_f32(mut input: &str, row: Row) -> Option<UNumber> {
     if !input.ends_with("INF") {
         input = input.trim_end_matches('F');
     }
+    let mut input: String = input.into();
+    input.retain(|c| c != ' ');
     if input.is_empty() {
         return Some(0);
     }

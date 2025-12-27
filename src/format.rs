@@ -21,29 +21,6 @@ use std::{
 pub const NUMBER_STRING_WIDTH: usize = 32;
 pub const REAL_NUMBER_STRING_WIDTH: usize = NUMBER_DIGIT_WIDTH as usize;
 
-#[allow(dead_code)]
-pub const fn char_to_number(char: char) -> UNumber {
-    match char {
-        '0' => 0,
-        '1' => 1,
-        '2' => 2,
-        '3' => 3,
-        '4' => 4,
-        '5' => 5,
-        '6' => 6,
-        '7' => 7,
-        '8' => 8,
-        '9' => 9,
-        'a' | 'A' => 0xA,
-        'b' | 'B' => 0xB,
-        'c' | 'C' => 0xC,
-        'd' | 'D' => 0xD,
-        'e' | 'E' => 0xE,
-        'f' | 'F' => 0xF,
-        _ => 0,
-    }
-}
-
 pub const fn u8_char_to_number(char: u8) -> UNumber {
     match char {
         b'0' => 0,

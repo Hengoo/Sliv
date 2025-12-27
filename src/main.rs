@@ -128,13 +128,21 @@ impl App {
                 } else {
                     format::replace_characters_automatic(0, self.cursor, b"1")
                 };
+
+                let overwrite = if self.cursor_is_float() {
+                    let mut buffer = [b'1'; REAL_NUMBER_STRING_WIDTH];
+                    buffer[..(self.cursor.text_pos - 1) as usize].fill(b' ');
+                    Some(buffer)
+                } else {
+                    None
+                };
                 Self::draw_column(
                     &mut self.backend,
                     tmp,
                     cursor.col,
                     true,
                     self.cursor,
-                    self.float_buffer.as_ref(),
+                    overwrite.as_ref(),
                 )?;
             }
             Self::draw_column(
@@ -292,51 +300,21 @@ impl App {
         match event.code {
             // eXecure character (same keybind as in VIM)
             KeyCode::Backspace | KeyCode::Char('x') => {
-                if self.cursor_is_float() {
-                    if self.float_buffer.is_none() {
-                        self.init_float_buffer()?;
-                    }
-                    let buffer = self.float_buffer.as_mut().unwrap();
-                    let i = (self.cursor.text_pos - 1) as usize;
-                    buffer.copy_within(0..i, 1);
-                    buffer[0] = b' ';
-                    self.apply_float_buffer()?;
-                } else {
-                    let (num, _) = self.get_current_column();
-                    let num = remove_character_automatic(num, self.cursor);
-                    self.set_number(num);
-                }
+                let ctrl = event
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                self.backspace(ctrl)?;
             }
             KeyCode::Char('X') => {
                 self.float_buffer = None;
                 self.set_number(0);
+                self.cursor.text_pos = NUMBER_DIGIT_WIDTH;
             }
             KeyCode::Delete => {
-                if self.cursor_is_float() {
-                    let i = (self.cursor.text_pos - 1) as usize;
-                    if i < REAL_NUMBER_STRING_WIDTH - 1 {
-                        if self.float_buffer.is_none() {
-                            self.init_float_buffer()?;
-                        }
-                        let buffer = self.float_buffer.as_mut().unwrap();
-                        buffer.copy_within(0..=i, 1);
-                        buffer[0] = b' ';
-                        self.cursor.move_right();
-                        self.apply_float_buffer()?;
-                    }
-                } else {
-                    let (num, _) = self.get_current_column();
-                    let cursor_before = self.cursor;
-                    self.cursor.move_right();
-                    // We are already at the right edge -> delete does nothing
-                    if cursor_before != self.cursor {
-                        let num = remove_character_automatic(num, self.cursor);
-                        // Have cursor at the correct position for undo
-                        self.cursor = cursor_before;
-                        self.set_number(num);
-                        self.cursor.move_right();
-                    }
-                }
+                let ctrl = event
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                self.delete(ctrl)?;
             }
             KeyCode::Enter => {
                 // Used to accept the float buffer
@@ -485,8 +463,13 @@ impl App {
                 self.backend.set_cursor_write_mode(self.cursor_write_mode);
             }
             KeyCode::Char('h' | 'H') => {
-                self.write_help = !self.write_help;
-                self.force_redraw = true;
+                if event.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Terminals are cooked, Ctrl+Backspace reaches us as Ctrl+h
+                    self.backspace(true)?;
+                } else {
+                    self.write_help = !self.write_help;
+                    self.force_redraw = true;
+                }
             }
             KeyCode::Char(' ') => {
                 let _ = self.handle_char_input('0')?;
@@ -513,6 +496,87 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    fn delete(&mut self, to_word_end: bool) -> Result<(), anyhow::Error> {
+        if self.cursor_is_float() {
+            let i = (self.cursor.text_pos - 1) as usize;
+            if i < REAL_NUMBER_STRING_WIDTH - 1 {
+                if self.float_buffer.is_none() {
+                    self.init_float_buffer()?;
+                }
+                let buffer = self.float_buffer.as_mut().unwrap();
+                let shift_distance = if to_word_end { buffer.len() - i - 1 } else { 1 };
+                buffer.copy_within(0..=i, shift_distance);
+                buffer[0..shift_distance].fill(b' ');
+                self.apply_float_buffer()?;
+                if to_word_end {
+                    self.move_cursor_end();
+                } else {
+                    self.cursor.move_right();
+                }
+            }
+        } else {
+            let (num, _) = self.get_current_column();
+            let mut del_cursor = self.cursor;
+            del_cursor.move_right();
+            // We are already at the right edge -> delete does nothing
+            if del_cursor == self.cursor {
+                return Ok(());
+            }
+            if to_word_end {
+                let mut num = num;
+                let mut last_num = num;
+                let mut last_cursor = del_cursor;
+                loop {
+                    num = remove_character_automatic(num, del_cursor);
+                    del_cursor.move_right();
+                    if num == last_num || last_cursor == del_cursor {
+                        break;
+                    }
+                    last_num = num;
+                    last_cursor = del_cursor;
+                }
+                self.set_number(num);
+                loop {
+                    self.move_cursor_end();
+                    if !matches!(self.cursor.row, Row::Bin0 | Row::Bin1 | Row::Bin2) {
+                        break;
+                    }
+                }
+            } else {
+                let num = remove_character_automatic(num, del_cursor);
+                self.set_number(num);
+                self.cursor.move_right();
+            }
+        }
+        Ok(())
+    }
+
+    fn backspace(&mut self, to_word_end: bool) -> Result<(), anyhow::Error> {
+        if self.cursor_is_float() {
+            if self.float_buffer.is_none() {
+                self.init_float_buffer()?;
+            }
+            let buffer = self.float_buffer.as_mut().unwrap();
+            let i = (self.cursor.text_pos - 1) as usize;
+            buffer.copy_within(0..i, 1);
+            let clear_id = if to_word_end { i + 1 } else { 1 };
+            buffer[0..clear_id].fill(b' ');
+            self.apply_float_buffer()?;
+        } else {
+            let (mut num, _) = self.get_current_column();
+            let mut before = num;
+            loop {
+                num = remove_character_automatic(num, self.cursor);
+                if num == before || !to_word_end {
+                    break;
+                }
+                before = num;
+            }
+            self.set_number(num);
+        }
+        Ok(())
     }
 
     fn set_cursor_from_mouse(&mut self, column: u16, row: u16) {
@@ -640,9 +704,12 @@ impl App {
             if self.float_buffer.is_none() {
                 self.init_float_buffer()?;
             }
-            let buffer: &mut [u8; 26] = self.float_buffer.as_mut().unwrap();
-            let i = (self.cursor.text_pos - 1) as usize;
+            let mut buffer = [b'0'; REAL_NUMBER_STRING_WIDTH];
+            buffer[..(self.cursor.text_pos) as usize].fill(b' ');
+            let trimmed = self.float_buffer.as_ref().unwrap().trim_ascii_start();
+            buffer[REAL_NUMBER_STRING_WIDTH - trimmed.len()..].copy_from_slice(trimmed);
 
+            let i = (self.cursor.text_pos - 1) as usize;
             if matches!(self.cursor_write_mode, CursorWriteMode::Insert) {
                 buffer.copy_within(1..=i, 0);
             }
@@ -651,6 +718,7 @@ impl App {
                 self.cursor.move_right();
             }
 
+            self.float_buffer = Some(buffer);
             self.apply_float_buffer()?;
             return Ok(true);
         }
@@ -798,8 +866,7 @@ impl App {
 
             // grey zero backround cursor hint
             if write_background {
-                // float does not support this hint
-                let mut skip = is_float(row);
+                let mut skip = false;
                 // disable hint for rows the cursor is not on
                 if matches!(row, Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3) {
                     skip |= !matches!(
@@ -819,17 +886,6 @@ impl App {
                     row as u8 + 1,
                     write_background,
                     Some(COLOR_UNUSED_DIGIT),
-                )?;
-                continue;
-            }
-            if row == Row::F32L && number >= UNumber::from(u32::MAX) {
-                Self::write_trimmed(
-                    b,
-                    text,
-                    x_pos,
-                    row as u8 + 1,
-                    write_background,
-                    Some(style::Color::Yellow),
                 )?;
                 continue;
             }
@@ -940,10 +996,10 @@ impl App {
                 style::Color::Grey,
             )?;
             b.cursor_move_to_next_line(1);
-            b.println("'y', 'Ctr_c'  copy number to clipboard")?;
+            b.println("'y', 'Ctr+c'  copy number to clipboard")?;
             b.println("'mouse2'      copy number under mouse to clipboard")?;
             b.println("'Y'           copy number with formatting to clipboard")?;
-            b.println("'p', 'Ctr_v'  paste number from clipboard")?;
+            b.println("'p', 'Ctr+v'  paste number from clipboard")?;
             b.println("'mouse3'      paste number from clipboard to mouse")?;
 
             b.cursor_move_to_next_line(1);
@@ -952,8 +1008,8 @@ impl App {
             b.println("'Arrow keys'  cursor movement")?;
             b.println("'mouse1'      cursor movement")?;
             b.println("'Tab'         swap between the two colums")?;
-            b.println("'Home', 'Ctr_left'  jump to start of number")?;
-            b.println("'End', 'Ctr_right'  jump to end of number")?;
+            b.println("'Home', 'Ctr+left'  jump to start of number")?;
+            b.println("'End', 'Ctr+right'  jump to end of number")?;
 
             b.cursor_move_to_next_line(1);
             b.print_with_color(
@@ -961,8 +1017,8 @@ impl App {
                 style::Color::Grey,
             )?;
             b.cursor_move_to_next_line(1);
-            b.println("'Ctr_t'       add new tab")?;
-            b.println("'Alt_t'       delete tab")?;
+            b.println("'Ctr+t'       add new tab")?;
+            b.println("'Alt+t'       delete tab")?;
             b.println("'t',          navigate to next tab")?;
             b.println("'T'           navigate to previous tab")?;
 

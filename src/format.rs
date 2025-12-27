@@ -441,9 +441,9 @@ fn replace_chars_decimal(number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumb
     result.try_into().unwrap_or(UNumber::MAX)
 }
 
-fn replace_chars_signed_decimal(number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
+fn replace_chars_signed_decimal(number_input: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
     // working with i128 to avoid unnecessary complexity doing this correctly
-    let number: i128 = make_negative(number).into();
+    let number: i128 = make_negative(number_input).into();
     let mut middle: i128 = 0;
     let mut count = 0;
     let mut truncated_count = 0;
@@ -474,7 +474,12 @@ fn replace_chars_signed_decimal(number: UNumber, cursor: Cursor, chars: &[u8]) -
     middle *= -10_i128.pow(start_pos.into());
 
     let result = left + middle + right;
-    INumber::try_from(result).unwrap_or(INumber::MIN) as UNumber
+    if number == result {
+        // avoid changing the other representations when the signed number stays the same
+        number_input
+    } else {
+        INumber::try_from(result).unwrap_or(INumber::MIN) as UNumber
+    }
 }
 
 fn replace_chars_hex(mut number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumber {
@@ -543,9 +548,9 @@ fn replace_chars_bin(mut number: UNumber, cursor: Cursor, chars: &[u8]) -> UNumb
 }
 
 // Shifts the caracters at the left of the cursor position in the requested direction
-pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) -> UNumber {
+pub fn shift_characters_automatic(number_input: UNumber, cursor: Cursor, shift: i8) -> UNumber {
     if shift == 0 {
-        return number;
+        return number_input;
     }
     match cursor.row {
         Row::Decimal => {
@@ -553,14 +558,14 @@ pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) ->
                 column::LOOKUP_TABLE[cursor.row as usize][cursor.text_pos as usize].into();
             if shift.is_positive() {
                 let shift: u32 = shift.try_into().unwrap();
-                let mut left = number - (number % 10_u64.pow(start_pos));
-                let right = number % 10_u64.pow(start_pos);
+                let mut left = number_input - (number_input % 10_u64.pow(start_pos));
+                let right = number_input % 10_u64.pow(start_pos);
                 left = left.saturating_mul(10_u64.saturating_pow(shift));
                 left.saturating_add(right)
             } else {
                 let shift: u32 = (-shift).try_into().unwrap();
-                let mut left = number - (number % 10_u64.saturating_pow(start_pos));
-                let right = number % 10_u64.pow(start_pos.saturating_sub(shift));
+                let mut left = number_input - (number_input % 10_u64.saturating_pow(start_pos));
+                let right = number_input % 10_u64.pow(start_pos.saturating_sub(shift));
                 left /= 10_u64.saturating_pow(shift);
                 left.saturating_add(right)
             }
@@ -568,7 +573,7 @@ pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) ->
         Row::Signed => {
             let start_pos: u32 =
                 column::LOOKUP_TABLE[cursor.row as usize][cursor.text_pos as usize].into();
-            let number = make_negative(number);
+            let number = make_negative(number_input);
             if shift.is_positive() {
                 let shift: u32 = shift.try_into().unwrap();
                 let mut left = number - (number % 10_i64.saturating_pow(start_pos));
@@ -580,7 +585,13 @@ pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) ->
                 let mut left = number - (number % 10_i64.saturating_pow(start_pos));
                 let right = number % 10_i64.pow(start_pos.saturating_sub(shift));
                 left /= 10_i64.saturating_pow(shift);
-                left.saturating_add(right) as UNumber
+                left = left.saturating_add(right);
+                if left == number {
+                    // avoid changing the other representations when the signed number stays the same
+                    number_input
+                } else {
+                    left as UNumber
+                }
             }
         }
         Row::Hex | Row::Bin0 | Row::Bin1 | Row::Bin2 | Row::Bin3 => {
@@ -592,8 +603,8 @@ pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) ->
                 let bit_shift: u32 = bit_shift.try_into().unwrap();
                 let left_mask = UNumber::MAX << bit_pos;
                 let mut new_number =
-                    (number & left_mask).saturating_mul(2_u64.saturating_pow(bit_shift));
-                new_number |= number & !left_mask;
+                    (number_input & left_mask).saturating_mul(2_u64.saturating_pow(bit_shift));
+                new_number |= number_input & !left_mask;
                 new_number
             } else {
                 let bit_shift: u32 = (-bit_shift).try_into().unwrap();
@@ -601,12 +612,12 @@ pub fn shift_characters_automatic(number: UNumber, cursor: Cursor, shift: i8) ->
                     return 0;
                 }
                 let left_mask = UNumber::MAX << bit_pos;
-                let mut new_number = (number & left_mask).wrapping_shr(bit_shift);
-                new_number |= number & (!left_mask).wrapping_shr(bit_shift);
+                let mut new_number = (number_input & left_mask).wrapping_shr(bit_shift);
+                new_number |= number_input & (!left_mask).wrapping_shr(bit_shift);
                 new_number
             }
         }
-        _ => number,
+        _ => number_input,
     }
 }
 

@@ -264,7 +264,6 @@ impl Default for Cursor {
 #[derive(Debug, Clone)]
 pub struct Column {
     // each column has its own history
-    // maybe use circular buffer
     history: Vec<(UNumber, Cursor)>,
     // the index in the history we are currently working with.
     index: usize,

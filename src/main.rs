@@ -1,8 +1,9 @@
-#![warn(
-    clippy::all,
-    // clippy::pedantic,
-    clippy::nursery,
-    clippy::cargo,
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    clippy::multiple_crate_versions
 )]
 
 use core::str;
@@ -399,9 +400,8 @@ impl App {
                     self.handle_char_input('c')?;
                 }
             }
-            KeyCode::Insert => self.paste_from_clipboard(false),
+            KeyCode::Insert | KeyCode::Char('p') => self.paste_from_clipboard(false),
             // paste
-            KeyCode::Char('p') => self.paste_from_clipboard(false),
             // Ctrl V is paste, because why not
             KeyCode::Char('v') => {
                 if event.modifiers.contains(KeyModifiers::CONTROL) {
@@ -659,14 +659,14 @@ impl App {
     // Move to leftmost position, but not further than the number itself
     fn move_cursor_home(&mut self) -> Result<(), anyhow::Error> {
         let (num, _) = self.get_current_column();
-        let text = self
-            .float_buffer
-            .map(|t| {
+        let text = self.float_buffer.map_or_else(
+            || format_automatic(num, self.cursor.row),
+            |t| {
                 let mut res = [b' '; NUMBER_STRING_WIDTH];
                 res[NUMBER_STRING_WIDTH - REAL_NUMBER_STRING_WIDTH..].copy_from_slice(&t);
                 Ok(res)
-            })
-            .unwrap_or_else(|| format_automatic(num, self.cursor.row))?;
+            },
+        )?;
 
         let trimmed = text.trim_ascii_start();
         self.cursor.text_pos = NUMBER_DIGIT_WIDTH - trimmed.len() as u8;
@@ -706,7 +706,11 @@ impl App {
             }
             let mut buffer = [b'0'; REAL_NUMBER_STRING_WIDTH];
             buffer[..(self.cursor.text_pos) as usize].fill(b' ');
-            let trimmed = self.float_buffer.as_ref().unwrap().trim_ascii_start();
+            let mut trimmed = self.float_buffer.as_ref().unwrap().trim_ascii_start();
+            let negative = trimmed.starts_with(b"-");
+            if negative {
+                trimmed = &trimmed[1..];
+            }
             buffer[REAL_NUMBER_STRING_WIDTH - trimmed.len()..].copy_from_slice(trimmed);
 
             let i = (self.cursor.text_pos - 1) as usize;
@@ -714,12 +718,19 @@ impl App {
                 buffer.copy_within(1..=i, 0);
             }
             buffer[i] = char as u8;
+            if i != 0 && negative {
+                buffer[i - 1] = b'-';
+            }
             if matches!(self.cursor_write_mode, CursorWriteMode::Replace) {
                 self.cursor.move_right();
             }
 
             self.float_buffer = Some(buffer);
             self.apply_float_buffer()?;
+            if i == 0 && negative {
+                // fallback when user is writing leftmost char on negative float
+                self.set_negative();
+            }
             return Ok(true);
         }
 
@@ -760,20 +771,21 @@ impl App {
             _ => {
                 let signed = format::handle_negative(num);
                 if let Some(neg) = signed.checked_neg() {
-                    self.set_number(neg as UNumber);
+                    self.set_number(neg.cast_unsigned());
                 } else {
                     // this can only happen if singed num was MIN
                     self.set_number((INumber::MAX) as UNumber + 1);
                 }
             }
         }
+        self.float_buffer = None;
     }
 
     fn set_positive(&mut self) {
         let (num, _) = self.get_current_column();
         match self.cursor.row {
-            Row::F64 | Row::F32H => self.set_number(num | 0x8000_0000_0000_0000),
-            Row::F32L => self.set_number(num | 0x8000_0000),
+            Row::F64 | Row::F32H => self.set_number(num & !0x8000_0000_0000_0000),
+            Row::F32L => self.set_number(num & !0x8000_0000),
             _ => {
                 let signed = format::handle_negative(num);
                 if signed.is_negative() {
@@ -781,13 +793,14 @@ impl App {
                 }
             }
         }
+        self.float_buffer = None;
     }
 
     fn set_negative(&mut self) {
         let (num, _) = self.get_current_column();
         match self.cursor.row {
-            Row::F64 | Row::F32H => self.set_number(num & !0x8000_0000_0000_0000),
-            Row::F32L => self.set_number(num & !0x8000_0000),
+            Row::F64 | Row::F32H => self.set_number(num | 0x8000_0000_0000_0000),
+            Row::F32L => self.set_number(num | 0x8000_0000),
             _ => {
                 let signed = format::handle_negative(num);
                 if signed.is_positive() {
@@ -795,6 +808,7 @@ impl App {
                 }
             }
         }
+        self.float_buffer = None;
     }
 
     fn write_trimmed(

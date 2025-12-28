@@ -261,7 +261,7 @@ impl Backend {
         let pos1 = Pos { x: x1, y: y1 };
         let pix0 = self.buffer.pixels[pos0.get_flat_index(self.size)?].clone();
         let pix1 = self.buffer.pixels[pos1.get_flat_index(self.size)?].clone();
-
+        #[allow(clippy::nonminimal_bool)]
         if (pix0.color == COLOR_UNUSED_DIGIT && pix1.color == COLOR_UNUSED_DIGIT)
             || (pix0.color == COLOR_UNUSED_DIGIT && pix1.value == ' ')
             || (pix0.value == ' ' && pix1.color == COLOR_UNUSED_DIGIT)

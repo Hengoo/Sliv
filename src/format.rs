@@ -22,6 +22,7 @@ pub const NUMBER_STRING_WIDTH: usize = 32;
 pub const REAL_NUMBER_STRING_WIDTH: usize = NUMBER_DIGIT_WIDTH as usize;
 
 pub const fn u8_char_to_number(char: u8) -> UNumber {
+    #[allow(clippy::match_same_arms)]
     match char {
         b'0' => 0,
         b'1' => 1,
@@ -71,17 +72,17 @@ const VALID_FLOAT_CHARACTERS: &[u8; 15] = b"0123456789.eE+-";
 // the common integer sizes (i8, i16. i32, i64, i128)
 pub const fn handle_negative(number: UNumber) -> INumber {
     if number == 0 {
-        return number as INumber;
+        return number.cast_signed();
     }
 
     let base = number.ilog2();
     if let 7 | 15 | 31 | 63 | 127 = base {
         let mut res = -1;
         res <<= base;
-        res |= number as INumber;
+        res |= number.cast_signed();
         res
     } else {
-        number as INumber
+        number.cast_signed()
     }
 }
 
@@ -252,7 +253,7 @@ fn parse_signed(input: &str) -> Option<UNumber> {
     }
     input.retain(|c| c.is_ascii_digit() || c == '-');
     let signed = INumber::from_str_radix(&input, 10).ok();
-    signed.map(|num| num as UNumber)
+    signed.map(INumber::cast_unsigned)
 }
 
 fn parse_hex(input: &str) -> Option<UNumber> {
@@ -439,7 +440,7 @@ fn replace_chars_signed_decimal(number_input: UNumber, cursor: Cursor, chars: &[
     }
     let start_pos = column::LOOKUP_TABLE[cursor.row as usize][cursor.text_pos as usize];
     if truncated_count + start_pos > 20 {
-        return INumber::MIN as UNumber;
+        return INumber::MIN.cast_unsigned();
     }
     let end_pos = start_pos + count;
 
@@ -455,7 +456,9 @@ fn replace_chars_signed_decimal(number_input: UNumber, cursor: Cursor, chars: &[
         // avoid changing the other representations when the signed number stays the same
         number_input
     } else {
-        INumber::try_from(result).unwrap_or(INumber::MIN) as UNumber
+        INumber::try_from(result)
+            .unwrap_or(INumber::MIN)
+            .cast_unsigned()
     }
 }
 
@@ -556,7 +559,7 @@ pub fn shift_characters_automatic(number_input: UNumber, cursor: Cursor, shift: 
                 let mut left = number - (number % 10_i64.saturating_pow(start_pos));
                 let right = number % 10_i64.pow(start_pos);
                 left = left.saturating_mul(10_i64.saturating_pow(shift));
-                left.saturating_add(right) as UNumber
+                left.saturating_add(right).cast_unsigned()
             } else {
                 let shift: u32 = (-shift).try_into().unwrap();
                 let mut left = number - (number % 10_i64.saturating_pow(start_pos));
@@ -567,7 +570,7 @@ pub fn shift_characters_automatic(number_input: UNumber, cursor: Cursor, shift: 
                     // avoid changing the other representations when the signed number stays the same
                     number_input
                 } else {
-                    left as UNumber
+                    left.cast_unsigned()
                 }
             }
         }
@@ -617,7 +620,7 @@ pub fn insert_characters_automatic(mut number: UNumber, cursor: Cursor, chars: &
     number = shift_characters_automatic(number, cursor, chars.len().try_into().unwrap());
     match cursor.row {
         Row::Signed => {
-            if number == INumber::MIN as UNumber {
+            if number == INumber::MIN.cast_unsigned() {
                 return number;
             }
         }
@@ -841,52 +844,52 @@ mod tests {
         // Signed
         let num: INumber = -51402;
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"00") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"00").cast_signed(),
             -51400
         );
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"00000") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"00000").cast_signed(),
             -0
         );
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"2571640257") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"2571640257").cast_signed(),
             -2_571_640_257
         );
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"544") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"544").cast_signed(),
             -51544
         );
         cursor.move_left();
         cursor.move_left();
         cursor.move_left();
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"00") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"00").cast_signed(),
             -402
         );
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"137") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"137").cast_signed(),
             -137_402
         );
         cursor.text_pos = 1;
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"66") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"66").cast_signed(),
             INumber::MIN
         );
         cursor.text_pos = 2;
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"1") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"1").cast_signed(),
             -1_000_000_000_000_051_402
         );
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"9") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"9").cast_signed(),
             -9_000_000_000_000_051_402
         );
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"09") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"09").cast_signed(),
             -9_000_000_000_000_051_402
         );
         assert_eq!(
-            replace_characters_automatic(num as UNumber, cursor, b"10") as INumber,
+            replace_characters_automatic(num.cast_unsigned(), cursor, b"10").cast_signed(),
             INumber::MIN
         );
 
@@ -1009,55 +1012,64 @@ mod tests {
         // Signed
         cursor = Cursor::default();
         cursor.move_down();
-        let mut num = (-42_i64) as UNumber;
-        assert_eq!(shift_characters_automatic(num, cursor, 1) as INumber, -420);
-        assert_eq!(shift_characters_automatic(num, cursor, -1) as INumber, -4);
+        let mut num = (-42_i64).cast_unsigned();
         assert_eq!(
-            shift_characters_automatic(num, cursor, 3) as INumber,
+            shift_characters_automatic(num, cursor, 1).cast_signed(),
+            -420
+        );
+        assert_eq!(
+            shift_characters_automatic(num, cursor, -1).cast_signed(),
+            -4
+        );
+        assert_eq!(
+            shift_characters_automatic(num, cursor, 3).cast_signed(),
             -42000
         );
         cursor.move_left();
         assert_eq!(
-            shift_characters_automatic(num, cursor, 3) as INumber,
+            shift_characters_automatic(num, cursor, 3).cast_signed(),
             -40002i64
         );
         assert_eq!(
-            shift_characters_automatic(num, cursor, -1) as INumber,
+            shift_characters_automatic(num, cursor, -1).cast_signed(),
             -4_i64
         );
-        num = (-6_402_155_412i64) as UNumber;
+        num = (-6_402_155_412i64).cast_unsigned();
         cursor.move_left();
         assert_eq!(
-            shift_characters_automatic(num, cursor, 0) as INumber,
+            shift_characters_automatic(num, cursor, 0).cast_signed(),
             -6_402_155_412
         );
         assert_eq!(
-            shift_characters_automatic(num, cursor, 1) as INumber,
+            shift_characters_automatic(num, cursor, 1).cast_signed(),
             -64_021_554_012
         );
         assert_eq!(
-            shift_characters_automatic(num, cursor, -1) as INumber,
+            shift_characters_automatic(num, cursor, -1).cast_signed(),
             -640_215_542
         );
         assert_eq!(
-            shift_characters_automatic(num, cursor, -2) as INumber,
+            shift_characters_automatic(num, cursor, -2).cast_signed(),
             -64_021_554
         );
         assert_eq!(
-            shift_characters_automatic(num, cursor, -3) as INumber,
+            shift_characters_automatic(num, cursor, -3).cast_signed(),
             -6_402_155
         );
-        assert_eq!(shift_characters_automatic(num, cursor, -9) as INumber, -6);
+        assert_eq!(
+            shift_characters_automatic(num, cursor, -9).cast_signed(),
+            -6
+        );
         assert_eq!(shift_characters_automatic(num, cursor, -10), 0);
         assert_eq!(shift_characters_automatic(num, cursor, -11), 0);
         assert_eq!(shift_characters_automatic(num, cursor, -21), 0);
         assert_eq!(
             shift_characters_automatic(num, cursor, 11),
-            INumber::MIN as UNumber
+            INumber::MIN.cast_unsigned()
         );
         assert_eq!(
             shift_characters_automatic(num, cursor, 21),
-            INumber::MIN as UNumber
+            INumber::MIN.cast_unsigned()
         );
 
         // Hex

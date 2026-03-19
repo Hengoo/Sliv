@@ -19,12 +19,6 @@ jobs:
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
-    
-    - name: Build
-      run: nix build .#test
-      
-    - name: Run tests
-      run: nix build
 
     - name: Setup Attic cache
       uses: ryanccn/attic-action@v0
@@ -33,3 +27,9 @@ jobs:
         cache: ${{ vars.ATTIC_USER }}
         token: ${{ secrets.ATTIC_TOKEN }}
         #skip-push: true
+    
+    - name: Test
+      run: nix build .#test
+      
+    - name: Build
+      run: nix build

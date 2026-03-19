@@ -24,7 +24,7 @@ jobs:
       uses: ryanccn/attic-action@v0
       with:
         endpoint: ${{ vars.ATTIC_ENDPOINT }}
-        cache: ${{ vars.ATTIC_USER }}
+        cache: ${{ vars.ATTIC_CACHE }}
         token: ${{ secrets.ATTIC_TOKEN }}
         #skip-push: true
     

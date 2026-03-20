@@ -1,6 +1,17 @@
-SLIV Simple Lightweight Integer Visualization 
+# SLIV Simple Lightweight Integer Visualization
 
-Sliv is a small terminal app to inspect numbers in different representations:  
+Sliv is an interactive terminal tool to inspect and compare numbers in different representations.
+
+## Example Float
+
+![FloatExample](docs/SlivFloat)
+
+## Example hex + diff
+
+![HexDiffExample](docs/SlivDEADBEEF)
+
+## Supported representations
+
 - unsigned integer  
 - signed integer  
 - hexadecimal  
